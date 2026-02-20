@@ -1,0 +1,2 @@
+from deep_compressor.config import DeepCompressorConfig
+from deep_compressor.model import DeepCompressor

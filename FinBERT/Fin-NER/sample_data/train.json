@@ -1,0 +1,199 @@
+[
+  {
+    "text": "招商银行2024年第三季度实现净利润285.24亿元，同比增长5.3%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "招商银行"},
+      {"start": 4, "end": 13, "label": "DATE", "text": "2024年第三季度"},
+      {"start": 15, "end": 18, "label": "METRIC", "text": "净利润"},
+      {"start": 18, "end": 26, "label": "VALUE", "text": "285.24亿元"},
+      {"start": 27, "end": 35, "label": "VALUE", "text": "同比增长5.3%"}
+    ]
+  },
+  {
+    "text": "中信证券分析师王明认为，贵州茅台2024年营业收入有望突破1500亿元。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "中信证券"},
+      {"start": 7, "end": 9, "label": "PER", "text": "王明"},
+      {"start": 12, "end": 16, "label": "ORG", "text": "贵州茅台"},
+      {"start": 16, "end": 21, "label": "DATE", "text": "2024年"},
+      {"start": 21, "end": 25, "label": "METRIC", "text": "营业收入"},
+      {"start": 29, "end": 35, "label": "VALUE", "text": "1500亿元"}
+    ]
+  },
+  {
+    "text": "比亚迪发布新能源汽车销量数据，2024年1月销量突破20万辆。",
+    "entities": [
+      {"start": 0, "end": 3, "label": "ORG", "text": "比亚迪"},
+      {"start": 5, "end": 10, "label": "PRODUCT", "text": "新能源汽车"},
+      {"start": 15, "end": 22, "label": "DATE", "text": "2024年1月"},
+      {"start": 26, "end": 30, "label": "VALUE", "text": "20万辆"}
+    ]
+  },
+  {
+    "text": "央行宣布降准0.5个百分点，释放长期资金约1万亿元。",
+    "entities": [
+      {"start": 0, "end": 2, "label": "ORG", "text": "央行"},
+      {"start": 4, "end": 6, "label": "EVENT", "text": "降准"},
+      {"start": 6, "end": 13, "label": "VALUE", "text": "0.5个百分点"},
+      {"start": 21, "end": 25, "label": "VALUE", "text": "1万亿元"}
+    ]
+  },
+  {
+    "text": "宁德时代董事长曾毓群表示，公司动力电池全球市场份额达到36.8%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "宁德时代"},
+      {"start": 7, "end": 10, "label": "PER", "text": "曾毓群"},
+      {"start": 15, "end": 19, "label": "PRODUCT", "text": "动力电池"},
+      {"start": 21, "end": 25, "label": "METRIC", "text": "市场份额"},
+      {"start": 27, "end": 32, "label": "VALUE", "text": "36.8%"}
+    ]
+  },
+  {
+    "text": "美联储主席鲍威尔在新闻发布会上暗示2025年可能加息两次。",
+    "entities": [
+      {"start": 0, "end": 3, "label": "ORG", "text": "美联储"},
+      {"start": 5, "end": 8, "label": "PER", "text": "鲍威尔"},
+      {"start": 17, "end": 22, "label": "DATE", "text": "2025年"},
+      {"start": 24, "end": 26, "label": "EVENT", "text": "加息"}
+    ]
+  },
+  {
+    "text": "腾讯控股2024年第四季度游戏业务收入达到460亿元，同比增长12%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "腾讯控股"},
+      {"start": 4, "end": 13, "label": "DATE", "text": "2024年第四季度"},
+      {"start": 13, "end": 17, "label": "PRODUCT", "text": "游戏业务"},
+      {"start": 17, "end": 19, "label": "METRIC", "text": "收入"},
+      {"start": 21, "end": 26, "label": "VALUE", "text": "460亿元"},
+      {"start": 27, "end": 34, "label": "VALUE", "text": "同比增长12%"}
+    ]
+  },
+  {
+    "text": "工商银行发放股息每股0.3元，股息率达到6.2%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "工商银行"},
+      {"start": 4, "end": 8, "label": "EVENT", "text": "发放股息"},
+      {"start": 8, "end": 14, "label": "VALUE", "text": "每股0.3元"},
+      {"start": 15, "end": 18, "label": "METRIC", "text": "股息率"},
+      {"start": 20, "end": 24, "label": "VALUE", "text": "6.2%"}
+    ]
+  },
+  {
+    "text": "中国平安宣布回购计划，拟斥资不超过100亿元回购A股股份。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "中国平安"},
+      {"start": 6, "end": 8, "label": "EVENT", "text": "回购"},
+      {"start": 17, "end": 22, "label": "VALUE", "text": "100亿元"},
+      {"start": 24, "end": 26, "label": "PRODUCT", "text": "A股"}
+    ]
+  },
+  {
+    "text": "华为2024年上半年研发投入超过800亿元，占营收比重达22.4%。",
+    "entities": [
+      {"start": 0, "end": 2, "label": "ORG", "text": "华为"},
+      {"start": 2, "end": 10, "label": "DATE", "text": "2024年上半年"},
+      {"start": 10, "end": 14, "label": "METRIC", "text": "研发投入"},
+      {"start": 16, "end": 21, "label": "VALUE", "text": "800亿元"},
+      {"start": 23, "end": 27, "label": "METRIC", "text": "营收比重"},
+      {"start": 28, "end": 33, "label": "VALUE", "text": "22.4%"}
+    ]
+  },
+  {
+    "text": "阿里巴巴集团完成对银泰百货的私有化收购，交易金额约为74亿美元。",
+    "entities": [
+      {"start": 0, "end": 6, "label": "ORG", "text": "阿里巴巴集团"},
+      {"start": 9, "end": 13, "label": "ORG", "text": "银泰百货"},
+      {"start": 17, "end": 19, "label": "EVENT", "text": "收购"},
+      {"start": 20, "end": 24, "label": "METRIC", "text": "交易金额"},
+      {"start": 26, "end": 31, "label": "VALUE", "text": "74亿美元"}
+    ]
+  },
+  {
+    "text": "宁德时代发布全固态电池产品，预计2027年实现量产。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "宁德时代"},
+      {"start": 6, "end": 11, "label": "PRODUCT", "text": "全固态电池"},
+      {"start": 16, "end": 21, "label": "DATE", "text": "2027年"}
+    ]
+  },
+  {
+    "text": "贵州茅台2024年度营业总收入达到1738.04亿元，归母净利润862.28亿元。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "贵州茅台"},
+      {"start": 4, "end": 10, "label": "DATE", "text": "2024年度"},
+      {"start": 10, "end": 15, "label": "METRIC", "text": "营业总收入"},
+      {"start": 17, "end": 26, "label": "VALUE", "text": "1738.04亿元"},
+      {"start": 27, "end": 32, "label": "METRIC", "text": "归母净利润"},
+      {"start": 32, "end": 40, "label": "VALUE", "text": "862.28亿元"}
+    ]
+  },
+  {
+    "text": "格力电器董事长董明珠在股东大会上表示公司将加大智能装备投入。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "格力电器"},
+      {"start": 7, "end": 10, "label": "PER", "text": "董明珠"},
+      {"start": 23, "end": 27, "label": "PRODUCT", "text": "智能装备"}
+    ]
+  },
+  {
+    "text": "中国人民银行2024年12月下调贷款市场报价利率至3.1%。",
+    "entities": [
+      {"start": 0, "end": 6, "label": "ORG", "text": "中国人民银行"},
+      {"start": 6, "end": 14, "label": "DATE", "text": "2024年12月"},
+      {"start": 14, "end": 16, "label": "EVENT", "text": "下调"},
+      {"start": 16, "end": 24, "label": "METRIC", "text": "贷款市场报价利率"},
+      {"start": 25, "end": 29, "label": "VALUE", "text": "3.1%"}
+    ]
+  },
+  {
+    "text": "京东集团宣布拆分京东工业并推动其独立上市，估值约为200亿美元。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "京东集团"},
+      {"start": 6, "end": 8, "label": "EVENT", "text": "拆分"},
+      {"start": 8, "end": 12, "label": "ORG", "text": "京东工业"},
+      {"start": 18, "end": 20, "label": "EVENT", "text": "上市"},
+      {"start": 21, "end": 23, "label": "METRIC", "text": "估值"},
+      {"start": 25, "end": 31, "label": "VALUE", "text": "200亿美元"}
+    ]
+  },
+  {
+    "text": "隆基绿能2024年前三季度毛利率下滑至14.2%，同比下降8.6个百分点。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "隆基绿能"},
+      {"start": 4, "end": 13, "label": "DATE", "text": "2024年前三季度"},
+      {"start": 13, "end": 16, "label": "METRIC", "text": "毛利率"},
+      {"start": 19, "end": 24, "label": "VALUE", "text": "14.2%"},
+      {"start": 25, "end": 36, "label": "VALUE", "text": "同比下降8.6个百分点"}
+    ]
+  },
+  {
+    "text": "万科A面临流动性压力，管理层表示正积极推进资产处置和债务重组。",
+    "entities": [
+      {"start": 0, "end": 3, "label": "ORG", "text": "万科A"},
+      {"start": 21, "end": 25, "label": "EVENT", "text": "资产处置"},
+      {"start": 26, "end": 30, "label": "EVENT", "text": "债务重组"}
+    ]
+  },
+  {
+    "text": "中芯国际2024年第四季度营收同比增长31.5%，晶圆代工产能利用率超过90%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "中芯国际"},
+      {"start": 4, "end": 13, "label": "DATE", "text": "2024年第四季度"},
+      {"start": 13, "end": 15, "label": "METRIC", "text": "营收"},
+      {"start": 15, "end": 24, "label": "VALUE", "text": "同比增长31.5%"},
+      {"start": 25, "end": 29, "label": "PRODUCT", "text": "晶圆代工"},
+      {"start": 29, "end": 34, "label": "METRIC", "text": "产能利用率"},
+      {"start": 36, "end": 39, "label": "VALUE", "text": "90%"}
+    ]
+  },
+  {
+    "text": "药明康德收到美国商务部出口管制通知，公司股价大跌15.7%。",
+    "entities": [
+      {"start": 0, "end": 4, "label": "ORG", "text": "药明康德"},
+      {"start": 6, "end": 11, "label": "ORG", "text": "美国商务部"},
+      {"start": 11, "end": 15, "label": "EVENT", "text": "出口管制"},
+      {"start": 20, "end": 22, "label": "METRIC", "text": "股价"},
+      {"start": 24, "end": 29, "label": "VALUE", "text": "15.7%"}
+    ]
+  }
+]

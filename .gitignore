@@ -1,0 +1,48 @@
+# ── Data / Models / Outputs (large files, not tracked) ──
+data/
+models/
+outputs/
+wandb/
+*.pt
+*.bin
+*.safetensors
+*.onnx
+*.db
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Environment ──
+.env
+.venv/
+env/
+venv/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── pytest / testing ──
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Hydra / Optuna ──
+.hydra/
+multirun/
+
+# ── Jupyter ──
+.ipynb_checkpoints/

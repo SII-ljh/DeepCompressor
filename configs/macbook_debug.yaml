@@ -1,0 +1,76 @@
+# MacBook Pro debug config (24GB RAM, MPS backend)
+# Short sequences + small batch for quick validation
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"   # local path
+  hidden_size: 1024
+  num_hidden_layers: 28
+  vocab_size: 151936
+  max_doc_tokens: 256       # ← reduced from 8192
+  max_question_tokens: 64   # ← reduced from 256
+  max_answer_tokens: 64     # ← reduced from 512
+
+finbert:
+  enabled: false
+
+perceiver:
+  perceiver_dim: 1024
+  num_queries: 64
+  num_heads: 16
+  head_dim: 64
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  anchor_score_scale_init: 1.0
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 200
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 1.0
+  hidden_mse_weight: 1.0
+  anchor_recon_weight: 0.5
+
+training:
+  stage: 1
+  learning_rate: 5.0e-4       # ← higher for faster convergence in quick test
+  batch_size: 1                # ← 1 for MacBook memory
+  gradient_accumulation_steps: 8  # effective batch = 8
+  max_steps: 300               # ← quick test
+  warmup_steps: 30
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 10                # ← more frequent logging
+  eval_every: 100
+  save_every: 100
+  output_dir: outputs
+  ntp_segment_len: 64          # ← reduced from 256
+  gradient_checkpointing: true   # save memory on 24GB MacBook
+  mixed_precision: "no"          # MPS fp16 support is limited
+
+# ── runtime ──
+data_path: ???
+eval_data_path: null
+resume_from: null
+max_eval_samples: 0
+max_train_samples: 0
+
+wandb:
+  enabled: false
+  project: deep-compressor-debug
+  entity: null
+  run_name: null
+  tags: []
+  offline: true
