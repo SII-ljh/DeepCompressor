@@ -171,48 +171,65 @@ class GuidedPerceiver(nn.Module):
                  stage_b_layers: int = 2,
                  stage_c_cross_layers: int = 2, stage_c_self_layers: int = 4,
                  finbert_enabled: bool = False,
-                 anchor_score_scale_init: float = 1.0):
+                 anchor_score_scale_init: float = 1.0,
+                 enable_stage_a: bool = True,
+                 enable_stage_b: bool = True,
+                 enable_stage_c: bool = True):
         super().__init__()
         self.finbert_enabled = finbert_enabled
+        self.enable_stage_a = enable_stage_a
+        self.enable_stage_b = enable_stage_b
+        self.enable_stage_c = enable_stage_c
 
         # Stage A: cross-attn from byte_array (with optional anchor bias) + self-attn
-        self.stage_a_cross = nn.ModuleList([
-            PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout,
-                           has_cross_attn=True,
-                           use_anchor_bias=finbert_enabled,
-                           anchor_score_scale_init=anchor_score_scale_init)
-            for _ in range(stage_a_cross_layers)
-        ])
-        self.stage_a_self = nn.ModuleList([
-            PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
-            for _ in range(stage_a_self_layers)
-        ])
+        if enable_stage_a:
+            self.stage_a_cross = nn.ModuleList([
+                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout,
+                               has_cross_attn=True,
+                               use_anchor_bias=finbert_enabled,
+                               anchor_score_scale_init=anchor_score_scale_init)
+                for _ in range(stage_a_cross_layers)
+            ])
+            self.stage_a_self = nn.ModuleList([
+                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
+                for _ in range(stage_a_self_layers)
+            ])
+        else:
+            self.stage_a_cross = nn.ModuleList()
+            self.stage_a_self = nn.ModuleList()
 
         # Stage B
-        if finbert_enabled:
-            # Anchor enhancement: cross-attn from anchor_embs + self-attn
-            self.stage_b_anchor_cross = nn.ModuleList([
-                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=True)
+        if enable_stage_b:
+            if finbert_enabled:
+                self.stage_b_anchor_cross = nn.ModuleList([
+                    PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=True)
+                    for _ in range(stage_b_layers)
+                ])
+            self.stage_b_self = nn.ModuleList([
+                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
                 for _ in range(stage_b_layers)
             ])
-        # Self-attention fallback (always created — used when FinBERT OFF, or when anchor_embs is None)
-        self.stage_b_self = nn.ModuleList([
-            PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
-            for _ in range(stage_b_layers)
-        ])
+        else:
+            if finbert_enabled:
+                self.stage_b_anchor_cross = nn.ModuleList()
+            self.stage_b_self = nn.ModuleList()
 
         # Stage C: cross-attn back to byte_array + deep self-attn
-        self.stage_c_cross = nn.ModuleList([
-            PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout,
-                           has_cross_attn=True,
-                           use_anchor_bias=finbert_enabled,
-                           anchor_score_scale_init=anchor_score_scale_init)
-            for _ in range(stage_c_cross_layers)
-        ])
-        self.stage_c_self = nn.ModuleList([
-            PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
-            for _ in range(stage_c_self_layers)
-        ])
+        if enable_stage_c:
+            self.stage_c_cross = nn.ModuleList([
+                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout,
+                               has_cross_attn=True,
+                               use_anchor_bias=finbert_enabled,
+                               anchor_score_scale_init=anchor_score_scale_init)
+                for _ in range(stage_c_cross_layers)
+            ])
+            self.stage_c_self = nn.ModuleList([
+                PerceiverBlock(dim, num_heads, head_dim, ff_mult, dropout, has_cross_attn=False)
+                for _ in range(stage_c_self_layers)
+            ])
+        else:
+            self.stage_c_cross = nn.ModuleList()
+            self.stage_c_self = nn.ModuleList()
 
         self.final_norm = nn.LayerNorm(dim)
 
@@ -233,23 +250,26 @@ class GuidedPerceiver(nn.Module):
         x = queries
 
         # Stage A: global compression from byte_array
-        for block in self.stage_a_cross:
-            x = block(x, kv=byte_array, kv_mask=byte_mask, anchor_scores=anchor_scores)
-        for block in self.stage_a_self:
-            x = block(x)
-
-        # Stage B
-        if self.finbert_enabled and anchor_embs is not None:
-            for block in self.stage_b_anchor_cross:
-                x = block(x, kv=anchor_embs)
-        else:
-            for block in self.stage_b_self:
+        if self.enable_stage_a:
+            for block in self.stage_a_cross:
+                x = block(x, kv=byte_array, kv_mask=byte_mask, anchor_scores=anchor_scores)
+            for block in self.stage_a_self:
                 x = block(x)
 
+        # Stage B
+        if self.enable_stage_b:
+            if self.finbert_enabled and anchor_embs is not None:
+                for block in self.stage_b_anchor_cross:
+                    x = block(x, kv=anchor_embs)
+            else:
+                for block in self.stage_b_self:
+                    x = block(x)
+
         # Stage C: deep reasoning re-read
-        for block in self.stage_c_cross:
-            x = block(x, kv=byte_array, kv_mask=byte_mask, anchor_scores=anchor_scores)
-        for block in self.stage_c_self:
-            x = block(x)
+        if self.enable_stage_c:
+            for block in self.stage_c_cross:
+                x = block(x, kv=byte_array, kv_mask=byte_mask, anchor_scores=anchor_scores)
+            for block in self.stage_c_self:
+                x = block(x)
 
         return self.final_norm(x)

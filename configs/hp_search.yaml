@@ -1,0 +1,92 @@
+# Hyperparameter search config
+# Short runs for Optuna trials; wandb controlled by hp_search.py script
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  hidden_size: 1024
+  num_hidden_layers: 28
+  vocab_size: 151936
+  max_doc_tokens: 256
+  max_question_tokens: 64
+  max_answer_tokens: 64
+
+finbert:
+  enabled: false
+
+perceiver:
+  perceiver_dim: 1024
+  num_queries: 64
+  num_heads: 16
+  head_dim: 64
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  anchor_score_scale_init: 1.0
+  dropout: 0.1               # overridden per-trial by hp_search.py
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1               # overridden per-trial by hp_search.py
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 100
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 1.0
+  hidden_mse_weight: 1.0
+  anchor_recon_weight: 0.5
+
+training:
+  stage: 1
+  learning_rate: 5.0e-4      # overridden per-trial
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_steps: 300              # short trials
+  warmup_steps: 30            # overridden per-trial
+  weight_decay: 0.01          # overridden per-trial
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 25
+  eval_every: 75              # 4 eval points per trial
+  save_every: 300             # only at end
+  output_dir: outputs/hp_search
+  ntp_segment_len: 64
+  gradient_checkpointing: true
+  mixed_precision: "no"
+
+ablation:
+  down_proj_mode: mlp
+  up_proj_mode: mlp
+  query_condition_on_question: true
+  enable_stage_a: true
+  enable_stage_b: true
+  enable_stage_c: true
+  override_stage_a_cross_layers: 0
+  override_stage_a_self_layers: 0
+  override_stage_b_layers: 0
+  override_stage_c_cross_layers: 0
+  override_stage_c_self_layers: 0
+  enable_kl_distillation: true
+  enable_hidden_mse_distillation: true
+  override_num_queries: 0
+
+# runtime
+data_path: ???
+eval_data_path: null
+resume_from: null
+max_eval_samples: 0
+max_train_samples: 0
+
+wandb:
+  enabled: false              # controlled by hp_search.py --wandb flag
+  project: dc-hp-search
+  entity: null
+  run_name: null
+  tags: []
+  offline: false

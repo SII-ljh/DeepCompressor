@@ -14,6 +14,7 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING, DictConfig, OmegaConf
 
 from deep_compressor.config import (
+    AblationConfig,
     DeepCompressorConfig,
     FinBERTConfig,
     LossConfig,
@@ -105,6 +106,24 @@ class TrainingHydraConf:
 
 
 @dataclass
+class AblationHydraConf:
+    down_proj_mode: str = "mlp"
+    up_proj_mode: str = "mlp"
+    query_condition_on_question: bool = True
+    enable_stage_a: bool = True
+    enable_stage_b: bool = True
+    enable_stage_c: bool = True
+    override_stage_a_cross_layers: int = 0
+    override_stage_a_self_layers: int = 0
+    override_stage_b_layers: int = 0
+    override_stage_c_cross_layers: int = 0
+    override_stage_c_self_layers: int = 0
+    enable_kl_distillation: bool = True
+    enable_hidden_mse_distillation: bool = True
+    override_num_queries: int = 0
+
+
+@dataclass
 class WandbConf:
     enabled: bool = True
     project: str = "deep-compressor"
@@ -124,6 +143,7 @@ class RunConf:
     projection: ProjectionHydraConf = field(default_factory=ProjectionHydraConf)
     loss: LossHydraConf = field(default_factory=LossHydraConf)
     training: TrainingHydraConf = field(default_factory=TrainingHydraConf)
+    ablation: AblationHydraConf = field(default_factory=AblationHydraConf)
 
     # runtime parameters (not part of DeepCompressorConfig)
     data_path: str = MISSING
@@ -150,6 +170,7 @@ def to_deep_compressor_config(cfg: DictConfig) -> DeepCompressorConfig:
         projection=ProjectionConfig(**OmegaConf.to_container(cfg.projection, resolve=True)),
         loss=LossConfig(**OmegaConf.to_container(cfg.loss, resolve=True)),
         training=TrainingConfig(**OmegaConf.to_container(cfg.training, resolve=True)),
+        ablation=AblationConfig(**OmegaConf.to_container(cfg.ablation, resolve=True)),
     )
 
 

@@ -333,8 +333,287 @@ def run_bottleneck(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Experiment 3 — Gradient Flow Analysis
+# ═══════════════════════════════════════════════════════════════════════
+
+def run_gradient_flow(
+    model: DeepCompressor,
+    doc_hidden: torch.Tensor,
+    batch: dict,
+    device: torch.device,
+) -> dict:
+    """Single forward+backward pass, report per-layer gradient norms."""
+
+    print("\n" + "=" * 76)
+    print("  EXPERIMENT 3: Gradient Flow Analysis")
+    print("=" * 76)
+
+    model.train()
+    model.zero_grad()
+
+    B = doc_hidden.shape[0]
+    D = model.config.qwen.hidden_size
+
+    byte_array = model.down_proj(doc_hidden)
+    queries = model.query_init(torch.zeros(B, D, device=device))
+    latent = model.perceiver(queries, byte_array, byte_mask=batch["doc_attention_mask"])
+    prefix = model.up_mlp(latent)
+    out = model.decode(prefix, batch["segment_ids"],
+                       batch["segment_attention_mask"],
+                       labels=batch["segment_labels"])
+    out.loss.backward()
+
+    # Collect per-module, per-layer gradient norms
+    results = {}
+    modules = {
+        "down_proj": model.down_proj,
+        "query_init": model.query_init,
+        "perceiver": model.perceiver,
+        "up_mlp": model.up_mlp,
+    }
+
+    print(f"\n  {'Module':<30}  {'Layer':<30}  {'|grad|':>12}  {'Status'}")
+    print(f"  {'─' * 90}")
+
+    for mod_name, module in modules.items():
+        layer_norms = {}
+        for name, param in module.named_parameters():
+            if param.grad is not None:
+                gn = param.grad.data.norm(2).item()
+                layer_norms[name] = gn
+
+                if gn < 1e-8:
+                    status = "VANISHING"
+                elif gn > 100:
+                    status = "EXPLODING"
+                else:
+                    status = "OK"
+
+                # Only print notable layers to keep output concise
+                if gn < 1e-7 or gn > 10 or name.endswith("weight"):
+                    print(f"  {mod_name:<30}  {name:<30}  {gn:>12.4e}  {status}")
+
+        results[mod_name] = layer_norms
+
+    # Summary
+    all_norms = [gn for layer_norms in results.values() for gn in layer_norms.values()]
+    if all_norms:
+        min_gn = min(all_norms)
+        max_gn = max(all_norms)
+        mean_gn = sum(all_norms) / len(all_norms)
+        print(f"\n  Summary: min={min_gn:.2e}, max={max_gn:.2e}, mean={mean_gn:.2e}")
+
+        vanishing = sum(1 for g in all_norms if g < 1e-7)
+        exploding = sum(1 for g in all_norms if g > 100)
+        if vanishing > 0:
+            print(f"  WARNING: {vanishing} parameters with vanishing gradients (<1e-7)")
+        if exploding > 0:
+            print(f"  WARNING: {exploding} parameters with exploding gradients (>100)")
+        if vanishing == 0 and exploding == 0:
+            print("  PASS — No gradient pathologies detected")
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Experiment 4 — Attention Pattern Analysis
+# ═══════════════════════════════════════════════════════════════════════
+
+def run_attention_analysis(
+    model: DeepCompressor,
+    doc_hidden: torch.Tensor,
+    batch: dict,
+    device: torch.device,
+) -> dict:
+    """Hook into Perceiver attention layers and analyze entropy of attention distributions."""
+
+    print("\n" + "=" * 76)
+    print("  EXPERIMENT 4: Attention Pattern Analysis")
+    print("=" * 76)
+
+    model.eval()
+
+    B = doc_hidden.shape[0]
+    D = model.config.qwen.hidden_size
+
+    attn_weights = {}
+
+    # Manually compute attention weights for analysis
+    with torch.no_grad():
+        byte_array = model.down_proj(doc_hidden)
+        queries = model.query_init(torch.zeros(B, D, device=device))
+
+        x = queries
+        doc_mask = batch["doc_attention_mask"]
+
+        # Analyze Stage A cross-attention
+        if model.perceiver.enable_stage_a:
+            for i, block in enumerate(model.perceiver.stage_a_cross):
+                if block.has_cross_attn:
+                    ca = block.cross_attn
+                    q_norm = ca.norm_q(x)
+                    kv_norm = ca.norm_kv(byte_array)
+                    H = ca.num_heads
+                    q_proj = ca.to_q(q_norm).view(B, -1, H, ca.head_dim).transpose(1, 2)
+                    k_proj = ca.to_k(kv_norm).view(B, -1, H, ca.head_dim).transpose(1, 2)
+                    attn_logits = (q_proj @ k_proj.transpose(-2, -1)) * ca.scale
+                    if doc_mask is not None:
+                        attn_logits = attn_logits.masked_fill(
+                            ~doc_mask[:, None, None, :].bool(), float("-inf"))
+                    attn_probs = torch.softmax(attn_logits, dim=-1)
+                    attn_weights[f"stage_a_cross_{i}"] = attn_probs
+                x = block(x, kv=byte_array, kv_mask=doc_mask)
+            for block in model.perceiver.stage_a_self:
+                x = block(x)
+
+        # Stage B self-attention
+        if model.perceiver.enable_stage_b:
+            for i, block in enumerate(model.perceiver.stage_b_self):
+                sa = block.self_attn
+                x_norm = sa.norm(x)
+                H = sa.num_heads
+                q = sa.to_q(x_norm).view(B, -1, H, sa.head_dim).transpose(1, 2)
+                k = sa.to_k(x_norm).view(B, -1, H, sa.head_dim).transpose(1, 2)
+                attn_logits = (q @ k.transpose(-2, -1)) * sa.scale
+                attn_probs = torch.softmax(attn_logits, dim=-1)
+                attn_weights[f"stage_b_self_{i}"] = attn_probs
+                x = block(x)
+
+        # Stage C cross-attention
+        if model.perceiver.enable_stage_c:
+            for i, block in enumerate(model.perceiver.stage_c_cross):
+                if block.has_cross_attn:
+                    ca = block.cross_attn
+                    q_norm = ca.norm_q(x)
+                    kv_norm = ca.norm_kv(byte_array)
+                    H = ca.num_heads
+                    q_proj = ca.to_q(q_norm).view(B, -1, H, ca.head_dim).transpose(1, 2)
+                    k_proj = ca.to_k(kv_norm).view(B, -1, H, ca.head_dim).transpose(1, 2)
+                    attn_logits = (q_proj @ k_proj.transpose(-2, -1)) * ca.scale
+                    if doc_mask is not None:
+                        attn_logits = attn_logits.masked_fill(
+                            ~doc_mask[:, None, None, :].bool(), float("-inf"))
+                    attn_probs = torch.softmax(attn_logits, dim=-1)
+                    attn_weights[f"stage_c_cross_{i}"] = attn_probs
+                x = block(x, kv=byte_array, kv_mask=doc_mask)
+
+    # Analyze attention entropy
+    print(f"\n  {'Layer':<25}  {'Mean Entropy':>14}  {'Min Entropy':>13}  {'Max Entropy':>13}")
+    print(f"  {'─' * 70}")
+
+    results = {}
+    for name, attn in attn_weights.items():
+        # attn: (B, H, Q, S) — compute entropy per query position
+        eps = 1e-10
+        entropy = -(attn * (attn + eps).log()).sum(dim=-1)  # (B, H, Q)
+        mean_ent = entropy.mean().item()
+        min_ent = entropy.min().item()
+        max_ent = entropy.max().item()
+        results[name] = {"mean": mean_ent, "min": min_ent, "max": max_ent}
+        print(f"  {name:<25}  {mean_ent:>14.4f}  {min_ent:>13.4f}  {max_ent:>13.4f}")
+
+    if results:
+        all_means = [r["mean"] for r in results.values()]
+        avg_entropy = sum(all_means) / len(all_means)
+        print(f"\n  Overall average entropy: {avg_entropy:.4f}")
+        if avg_entropy < 0.5:
+            print("  WARNING: Very low entropy — attention may be too peaked/collapsed")
+        elif avg_entropy > 5.0:
+            print("  INFO: High entropy — attention is broadly distributed (uniform-like)")
+        else:
+            print("  PASS — Entropy in healthy range")
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Experiment 5 — Compression Fidelity
+# ═══════════════════════════════════════════════════════════════════════
+
+def run_compression_fidelity(
+    model: DeepCompressor,
+    doc_hidden: torch.Tensor,
+    batch: dict,
+    device: torch.device,
+) -> dict:
+    """Compute cosine similarity between prefix embeddings and original Qwen hidden states."""
+
+    print("\n" + "=" * 76)
+    print("  EXPERIMENT 5: Compression Fidelity")
+    print("=" * 76)
+
+    model.eval()
+
+    B = doc_hidden.shape[0]
+    D = model.config.qwen.hidden_size
+    doc_mask = batch["doc_attention_mask"]
+
+    with torch.no_grad():
+        byte_array = model.down_proj(doc_hidden)
+        queries = model.query_init(torch.zeros(B, D, device=device))
+        latent = model.perceiver(queries, byte_array, byte_mask=doc_mask)
+        prefix = model.up_mlp(latent)  # (B, nq, D)
+
+        # Mean-pool prefix and doc_hidden for global comparison
+        prefix_pooled = prefix.mean(dim=1)  # (B, D)
+        mask_f = doc_mask.unsqueeze(-1).float()
+        doc_pooled = ((doc_hidden * mask_f).sum(1) /
+                      mask_f.sum(1).clamp(min=1))  # (B, D)
+
+        # Cosine similarity between prefix mean and doc mean
+        cos_sim_global = torch.nn.functional.cosine_similarity(
+            prefix_pooled, doc_pooled, dim=-1)  # (B,)
+
+        # Per-query cosine similarity with closest doc position
+        # prefix: (B, nq, D), doc_hidden: (B, doc_len, D)
+        prefix_norm = torch.nn.functional.normalize(prefix, dim=-1)
+        doc_norm = torch.nn.functional.normalize(doc_hidden, dim=-1)
+        # (B, nq, doc_len) cosine similarity matrix
+        sim_matrix = torch.bmm(prefix_norm, doc_norm.transpose(1, 2))
+        # Mask out padding positions
+        if doc_mask is not None:
+            sim_matrix = sim_matrix.masked_fill(
+                ~doc_mask[:, None, :].bool(), float("-inf"))
+        max_sim_per_query = sim_matrix.max(dim=-1).values  # (B, nq)
+        mean_max_sim = max_sim_per_query.mean().item()
+
+        # Random baseline
+        random_prefix = torch.randn_like(prefix) * 0.02
+        random_pooled = random_prefix.mean(dim=1)
+        cos_sim_random = torch.nn.functional.cosine_similarity(
+            random_pooled, doc_pooled, dim=-1)
+
+    print(f"\n  {'Metric':<40}  {'Value':>12}")
+    print(f"  {'─' * 55}")
+    print(f"  {'Global cosine sim (prefix↔doc mean)':<40}  {cos_sim_global.mean().item():>12.4f}")
+    print(f"  {'Random baseline cosine sim':<40}  {cos_sim_random.mean().item():>12.4f}")
+    print(f"  {'Mean max per-query cosine sim':<40}  {mean_max_sim:>12.4f}")
+    print(f"  {'Prefix embedding norm (mean)':<40}  {prefix.norm(dim=-1).mean().item():>12.4f}")
+    print(f"  {'Doc hidden states norm (mean)':<40}  {doc_hidden.norm(dim=-1).mean().item():>12.4f}")
+    print(f"  {'─' * 55}")
+
+    improvement = cos_sim_global.mean().item() - cos_sim_random.mean().item()
+    print(f"\n  Improvement over random: {improvement:+.4f}")
+    if improvement > 0.1:
+        print("  PASS — Prefix captures meaningful document information")
+    elif improvement > 0:
+        print("  MARGINAL — Some document signal, but weak")
+    else:
+        print("  FAIL — Prefix not more similar to doc than random")
+
+    return {
+        "global_cos_sim": cos_sim_global.mean().item(),
+        "random_cos_sim": cos_sim_random.mean().item(),
+        "mean_max_query_sim": mean_max_sim,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
+
+ALL_EXPERIMENTS = ["1", "2", "3", "4", "5"]
+
 
 def main():
     parser = argparse.ArgumentParser(description="Deep Compressor diagnostics")
@@ -344,9 +623,31 @@ def main():
     parser.add_argument("--lr",         type=float, default=5e-4)
     parser.add_argument("--log_every",  type=int,   default=20)
     parser.add_argument("--batch_size", type=int,   default=2)
+    parser.add_argument("--experiments", type=str, default="1,2,3,4,5",
+                        help="Comma-separated list of experiments to run (1-5)")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log results to wandb")
+    parser.add_argument("--wandb_project", type=str, default="dc-diagnostic",
+                        help="wandb project name")
     args = parser.parse_args()
 
+    experiments = [e.strip() for e in args.experiments.split(",")]
+
     device = _device()
+
+    # ── wandb init ────────────────────────────────────────────────────
+    wandb_run = None
+    if args.wandb:
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name="diagnostic",
+                config={"steps": args.steps, "lr": args.lr,
+                        "experiments": experiments},
+            )
+        except ImportError:
+            print("WARNING: wandb not installed, skipping wandb logging")
 
     # ── setup ─────────────────────────────────────────────────────────
     print(f"Device: {device}")
@@ -378,7 +679,7 @@ def main():
     model.to(device)
     batch = _to_device(batch, device)
 
-    # ── pre-compute Qwen features (shared by both experiments) ────────
+    # ── pre-compute Qwen features (shared by all experiments) ─────────
     print("\nPre-computing Qwen document features (one-time)...")
     with torch.no_grad():
         qwen_out = model.qwen(
@@ -395,51 +696,96 @@ def main():
     print(f"  doc_pooled: {tuple(doc_pooled.shape)}")
 
     # ── experiments ───────────────────────────────────────────────────
-    torch.manual_seed(config.training.seed)
-    exp1 = run_overfit(model, doc_hidden, batch, device,
-                       args.steps, args.lr, args.log_every)
+    all_results = {}
 
-    torch.manual_seed(config.training.seed)
-    exp2 = run_bottleneck(model, doc_pooled, batch, device,
-                          args.steps, args.lr, args.log_every)
+    if "1" in experiments:
+        torch.manual_seed(config.training.seed)
+        exp1 = run_overfit(model, doc_hidden, batch, device,
+                           args.steps, args.lr, args.log_every)
+        all_results["overfit"] = exp1
+        if wandb_run:
+            for i, loss in enumerate(exp1["losses"]):
+                wandb_run.log({"exp1/loss": loss}, step=i + 1)
 
-    # ── final comparison ──────────────────────────────────────────────
-    overfit_final = exp1["losses"][-1]
-    linear_final  = exp2["linear_losses"][-1]
-    mlp_final     = exp2["mlp_losses"][-1]
-    rnd           = exp2["random_loss"]
+    if "2" in experiments:
+        torch.manual_seed(config.training.seed)
+        exp2 = run_bottleneck(model, doc_pooled, batch, device,
+                              args.steps, args.lr, args.log_every)
+        all_results["bottleneck"] = exp2
+        if wandb_run:
+            wandb_run.log({
+                "exp2/random_loss": exp2["random_loss"],
+                "exp2/linear_final": exp2["linear_losses"][-1],
+                "exp2/mlp_final": exp2["mlp_losses"][-1],
+            })
 
-    print("\n" + "=" * 76)
-    print("  FINAL COMPARISON")
-    print("=" * 76)
+    if "3" in experiments:
+        torch.manual_seed(config.training.seed)
+        exp3 = run_gradient_flow(model, doc_hidden, batch, device)
+        all_results["gradient_flow"] = exp3
+        if wandb_run:
+            for mod_name, layer_norms in exp3.items():
+                for layer_name, gn in layer_norms.items():
+                    wandb_run.log({f"exp3/{mod_name}/{layer_name}": gn})
 
-    print(f"\n  {'Method':<35}  {'Loss':>10}")
-    print(f"  {'─' * 48}")
-    print(f"  {'Random prefix (no learning)':<35}  {rnd:>10.4f}")
-    print(f"  {'Linear probe':<35}  {linear_final:>10.4f}")
-    print(f"  {'MLP probe (2-layer)':<35}  {mlp_final:>10.4f}")
-    print(f"  {'Full pipeline (Perceiver)':<35}  {overfit_final:>10.4f}")
-    print(f"  {'─' * 48}")
+    if "4" in experiments:
+        torch.manual_seed(config.training.seed)
+        exp4 = run_attention_analysis(model, doc_hidden, batch, device)
+        all_results["attention"] = exp4
+        if wandb_run:
+            for name, stats in exp4.items():
+                for k, v in stats.items():
+                    wandb_run.log({f"exp4/{name}/{k}": v})
 
-    all_beat_random = linear_final < rnd and mlp_final < rnd
-    pipeline_beats_mlp    = overfit_final < mlp_final
-    pipeline_beats_linear = overfit_final < linear_final
+    if "5" in experiments:
+        torch.manual_seed(config.training.seed)
+        exp5 = run_compression_fidelity(model, doc_hidden, batch, device)
+        all_results["fidelity"] = exp5
+        if wandb_run:
+            for k, v in exp5.items():
+                wandb_run.log({f"exp5/{k}": v})
 
-    print(f"\n  Conclusions:")
-    if not all_beat_random:
-        print("    [!] Not all probes beat random — training may need more steps")
-    if pipeline_beats_mlp:
-        print(f"    Full pipeline ({overfit_final:.4f}) < MLP ({mlp_final:.4f}) "
-              f"< Linear ({linear_final:.4f})")
-        print("    => Perceiver cross-attention extracts richer document features")
-        print("    => Architecture is working as intended")
-    elif pipeline_beats_linear:
-        print(f"    Linear ({linear_final:.4f}) > Full ({overfit_final:.4f}) "
-              f"> MLP ({mlp_final:.4f})")
-        print("    => Pipeline outperforms linear but not MLP — functioning, room to improve")
-    else:
-        print(f"    Full ({overfit_final:.4f}) >= Linear ({linear_final:.4f})")
-        print("    => Pipeline not outperforming simple baseline — investigate architecture")
+    # ── final comparison (if experiments 1 & 2 were both run) ─────────
+    if "1" in experiments and "2" in experiments:
+        overfit_final = all_results["overfit"]["losses"][-1]
+        linear_final  = all_results["bottleneck"]["linear_losses"][-1]
+        mlp_final     = all_results["bottleneck"]["mlp_losses"][-1]
+        rnd           = all_results["bottleneck"]["random_loss"]
+
+        print("\n" + "=" * 76)
+        print("  FINAL COMPARISON")
+        print("=" * 76)
+
+        print(f"\n  {'Method':<35}  {'Loss':>10}")
+        print(f"  {'─' * 48}")
+        print(f"  {'Random prefix (no learning)':<35}  {rnd:>10.4f}")
+        print(f"  {'Linear probe':<35}  {linear_final:>10.4f}")
+        print(f"  {'MLP probe (2-layer)':<35}  {mlp_final:>10.4f}")
+        print(f"  {'Full pipeline (Perceiver)':<35}  {overfit_final:>10.4f}")
+        print(f"  {'─' * 48}")
+
+        all_beat_random = linear_final < rnd and mlp_final < rnd
+        pipeline_beats_mlp    = overfit_final < mlp_final
+        pipeline_beats_linear = overfit_final < linear_final
+
+        print(f"\n  Conclusions:")
+        if not all_beat_random:
+            print("    [!] Not all probes beat random — training may need more steps")
+        if pipeline_beats_mlp:
+            print(f"    Full pipeline ({overfit_final:.4f}) < MLP ({mlp_final:.4f}) "
+                  f"< Linear ({linear_final:.4f})")
+            print("    => Perceiver cross-attention extracts richer document features")
+            print("    => Architecture is working as intended")
+        elif pipeline_beats_linear:
+            print(f"    Linear ({linear_final:.4f}) > Full ({overfit_final:.4f}) "
+                  f"> MLP ({mlp_final:.4f})")
+            print("    => Pipeline outperforms linear but not MLP — functioning, room to improve")
+        else:
+            print(f"    Full ({overfit_final:.4f}) >= Linear ({linear_final:.4f})")
+            print("    => Pipeline not outperforming simple baseline — investigate architecture")
+
+    if wandb_run:
+        wandb_run.finish()
 
     print()
     return 0

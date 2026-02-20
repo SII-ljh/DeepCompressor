@@ -10,12 +10,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from deep_compressor.config import DeepCompressorConfig
 from deep_compressor.loss import DistillationLoss, compute_total_loss
 from deep_compressor.modules.anchor_align import AnchorAlign
-from deep_compressor.modules.down_proj import DownProj
+from deep_compressor.modules.down_proj import build_down_proj
 from deep_compressor.modules.fact_decode_head import FactDecodeHead
 from deep_compressor.modules.ner_head import NERHead
 from deep_compressor.modules.perceiver import GuidedPerceiver
 from deep_compressor.modules.query_init import QueryInit
-from deep_compressor.modules.up_mlp import UpMLP
+from deep_compressor.modules.up_mlp import build_up_proj
 
 
 class DeepCompressor(nn.Module):
@@ -25,6 +25,7 @@ class DeepCompressor(nn.Module):
         qcfg = config.qwen
         pcfg = config.perceiver
         pjcfg = config.projection
+        abcfg = config.ablation
 
         # Frozen Qwen model
         if qwen_model is not None:
@@ -36,21 +37,33 @@ class DeepCompressor(nn.Module):
         for p in self.qwen.parameters():
             p.requires_grad = False
 
-        # Trainable modules
-        self.down_proj = DownProj(qcfg.hidden_size, pcfg.perceiver_dim, pjcfg.down_hidden, pjcfg.dropout)
-        self.query_init = QueryInit(pcfg.num_queries, pcfg.perceiver_dim, qcfg.hidden_size)
+        # Effective values from ablation overrides
+        num_queries = config.effective_num_queries
+
+        # Trainable modules (via factory functions for ablation)
+        self.down_proj = build_down_proj(
+            abcfg.down_proj_mode, qcfg.hidden_size, pcfg.perceiver_dim,
+            pjcfg.down_hidden, pjcfg.dropout)
+        self.query_init = QueryInit(
+            num_queries, pcfg.perceiver_dim, qcfg.hidden_size,
+            condition_on_question=abcfg.query_condition_on_question)
         self.perceiver = GuidedPerceiver(
             dim=pcfg.perceiver_dim, num_heads=pcfg.num_heads, head_dim=pcfg.head_dim,
             ff_mult=pcfg.ff_mult, dropout=pcfg.dropout,
-            stage_a_cross_layers=pcfg.stage_a_cross_layers,
-            stage_a_self_layers=pcfg.stage_a_self_layers,
-            stage_b_layers=pcfg.stage_b_layers,
-            stage_c_cross_layers=pcfg.stage_c_cross_layers,
-            stage_c_self_layers=pcfg.stage_c_self_layers,
+            stage_a_cross_layers=config.effective_stage_a_cross_layers,
+            stage_a_self_layers=config.effective_stage_a_self_layers,
+            stage_b_layers=config.effective_stage_b_layers,
+            stage_c_cross_layers=config.effective_stage_c_cross_layers,
+            stage_c_self_layers=config.effective_stage_c_self_layers,
             finbert_enabled=config.finbert.enabled,
             anchor_score_scale_init=pcfg.anchor_score_scale_init,
+            enable_stage_a=abcfg.enable_stage_a,
+            enable_stage_b=abcfg.enable_stage_b,
+            enable_stage_c=abcfg.enable_stage_c,
         )
-        self.up_mlp = UpMLP(pcfg.perceiver_dim, qcfg.hidden_size, pjcfg.up_hidden, pjcfg.dropout)
+        self.up_mlp = build_up_proj(
+            abcfg.up_proj_mode, pcfg.perceiver_dim, qcfg.hidden_size,
+            pjcfg.up_hidden, pjcfg.dropout)
 
         # FinBERT optional modules
         if config.finbert.enabled:
@@ -83,7 +96,6 @@ class DeepCompressor(nn.Module):
         """Get the token embedding layer from the Qwen model."""
         return self.qwen.model.embed_tokens
 
-    @torch.no_grad()
     def encode_document(self, doc_input_ids: torch.Tensor,
                         doc_attention_mask: torch.Tensor) -> torch.Tensor:
         """Encode document with frozen Qwen, project to Perceiver dim.
@@ -94,17 +106,15 @@ class DeepCompressor(nn.Module):
         Returns:
             byte_array: (batch, doc_len, perceiver_dim)
         """
-        outputs = self.qwen(
-            input_ids=doc_input_ids, attention_mask=doc_attention_mask,
-            output_hidden_states=True, use_cache=False,
-        )
-        # Use last hidden state
-        hidden = outputs.hidden_states[-1]  # (B, doc_len, qwen_dim)
-        # Re-enable grad for DownProj
-        hidden = hidden.detach()
+        with torch.no_grad():
+            outputs = self.qwen(
+                input_ids=doc_input_ids, attention_mask=doc_attention_mask,
+                output_hidden_states=True, use_cache=False,
+            )
+            hidden = outputs.hidden_states[-1].detach()  # (B, doc_len, qwen_dim)
+        # DownProj is trainable — must run outside no_grad
         return self.down_proj(hidden)
 
-    @torch.no_grad()
     def encode_question(self, q_input_ids: torch.Tensor,
                         q_attention_mask: torch.Tensor) -> torch.Tensor:
         """Encode question with frozen Qwen, mean-pool, then QueryInit.
@@ -115,15 +125,16 @@ class DeepCompressor(nn.Module):
         Returns:
             queries: (batch, num_queries, perceiver_dim)
         """
-        outputs = self.qwen(
-            input_ids=q_input_ids, attention_mask=q_attention_mask,
-            output_hidden_states=True, use_cache=False,
-        )
-        hidden = outputs.hidden_states[-1]  # (B, q_len, qwen_dim)
-        # Mean pool over valid positions
-        mask_expanded = q_attention_mask.unsqueeze(-1).float()
-        pooled = (hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
-        pooled = pooled.detach()  # (B, qwen_dim)
+        with torch.no_grad():
+            outputs = self.qwen(
+                input_ids=q_input_ids, attention_mask=q_attention_mask,
+                output_hidden_states=True, use_cache=False,
+            )
+            hidden = outputs.hidden_states[-1]  # (B, q_len, qwen_dim)
+            mask_expanded = q_attention_mask.unsqueeze(-1).float()
+            pooled = (hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+            pooled = pooled.detach()  # (B, qwen_dim)
+        # QueryInit is trainable — must run outside no_grad
         return self.query_init(pooled)
 
     def compress(self, queries: torch.Tensor, byte_array: torch.Tensor,
@@ -294,6 +305,12 @@ class DeepCompressor(nn.Module):
         q_labels = torch.full_like(q_input_ids, -100)
         full_labels = torch.cat([q_labels, answer_labels], dim=1)
 
+        # Apply ablation switches before computing what we need
+        if not self.config.ablation.enable_kl_distillation:
+            teacher_logits = None
+        if not self.config.ablation.enable_hidden_mse_distillation:
+            teacher_hidden = None
+
         need_hidden = teacher_hidden is not None
         outputs = self.decode(
             prefix_embeds, suffix_ids, suffix_mask,
@@ -303,7 +320,6 @@ class DeepCompressor(nn.Module):
         qa_ce_loss = outputs.loss
         lcfg = self.config.loss
 
-        # Distillation losses
         kl_loss = None
         hidden_mse_loss = None
         if teacher_logits is not None:

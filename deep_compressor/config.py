@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
@@ -85,6 +85,35 @@ class TrainingConfig:
 
 
 @dataclass
+class AblationConfig:
+    # Projection module mode: "mlp" (default) | "identity" | "linear"
+    down_proj_mode: str = "mlp"
+    up_proj_mode: str = "mlp"
+
+    # QueryInit: whether to condition on question
+    query_condition_on_question: bool = True
+
+    # Perceiver stage enables
+    enable_stage_a: bool = True
+    enable_stage_b: bool = True
+    enable_stage_c: bool = True
+
+    # Perceiver layer count overrides (0 = use PerceiverConfig defaults)
+    override_stage_a_cross_layers: int = 0
+    override_stage_a_self_layers: int = 0
+    override_stage_b_layers: int = 0
+    override_stage_c_cross_layers: int = 0
+    override_stage_c_self_layers: int = 0
+
+    # Distillation component enables
+    enable_kl_distillation: bool = True
+    enable_hidden_mse_distillation: bool = True
+
+    # num_queries override (0 = use PerceiverConfig.num_queries)
+    override_num_queries: int = 0
+
+
+@dataclass
 class DeepCompressorConfig:
     qwen: QwenConfig = field(default_factory=QwenConfig)
     finbert: FinBERTConfig = field(default_factory=FinBERTConfig)
@@ -92,6 +121,7 @@ class DeepCompressorConfig:
     projection: ProjectionConfig = field(default_factory=ProjectionConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    ablation: AblationConfig = field(default_factory=AblationConfig)
 
     def __post_init__(self) -> None:
         if self.perceiver.num_heads * self.perceiver.head_dim != self.perceiver.perceiver_dim:
@@ -104,6 +134,50 @@ class DeepCompressorConfig:
                 raise ValueError(
                     f"hidden_distill_layer {layer_idx} >= num_hidden_layers {self.qwen.num_hidden_layers}"
                 )
+        # Validate ablation config
+        ab = self.ablation
+        if ab.down_proj_mode not in ("mlp", "identity", "linear"):
+            raise ValueError(f"Invalid down_proj_mode: {ab.down_proj_mode}")
+        if ab.up_proj_mode not in ("mlp", "identity", "linear"):
+            raise ValueError(f"Invalid up_proj_mode: {ab.up_proj_mode}")
+        if ab.override_num_queries < 0:
+            raise ValueError(f"override_num_queries must be >= 0, got {ab.override_num_queries}")
+
+    @property
+    def effective_num_queries(self) -> int:
+        if self.ablation.override_num_queries > 0:
+            return self.ablation.override_num_queries
+        return self.perceiver.num_queries
+
+    @property
+    def effective_stage_a_cross_layers(self) -> int:
+        if self.ablation.override_stage_a_cross_layers > 0:
+            return self.ablation.override_stage_a_cross_layers
+        return self.perceiver.stage_a_cross_layers
+
+    @property
+    def effective_stage_a_self_layers(self) -> int:
+        if self.ablation.override_stage_a_self_layers > 0:
+            return self.ablation.override_stage_a_self_layers
+        return self.perceiver.stage_a_self_layers
+
+    @property
+    def effective_stage_b_layers(self) -> int:
+        if self.ablation.override_stage_b_layers > 0:
+            return self.ablation.override_stage_b_layers
+        return self.perceiver.stage_b_layers
+
+    @property
+    def effective_stage_c_cross_layers(self) -> int:
+        if self.ablation.override_stage_c_cross_layers > 0:
+            return self.ablation.override_stage_c_cross_layers
+        return self.perceiver.stage_c_cross_layers
+
+    @property
+    def effective_stage_c_self_layers(self) -> int:
+        if self.ablation.override_stage_c_self_layers > 0:
+            return self.ablation.override_stage_c_self_layers
+        return self.perceiver.stage_c_self_layers
 
     def to_dict(self) -> dict:
         import dataclasses
@@ -122,4 +196,5 @@ class DeepCompressorConfig:
             projection=ProjectionConfig(**raw.get("projection", {})),
             loss=LossConfig(**raw.get("loss", {})),
             training=TrainingConfig(**raw.get("training", {})),
+            ablation=AblationConfig(**raw.get("ablation", {})),
         )

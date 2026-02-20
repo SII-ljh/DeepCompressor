@@ -26,7 +26,10 @@ Estimated download time (full mode): ~1-2 hours (C4 and CLUECorpus streaming).
 Usage:
   python scripts/prepare_data.py                    # full download
   python scripts/prepare_data.py --test             # small subset
-  python scripts/prepare_data.py --make-tiny        # extract tiny from local data
+  python scripts/prepare_data.py --make-tiny        # ~50 samples for smoke tests
+  python scripts/prepare_data.py --make-dev         # ~500-2000 for HP tuning
+  python scripts/prepare_data.py --make-ablation    # ~1000 for ablation experiments
+  python scripts/prepare_data.py --make-all-subsets # all subsets at once
   python scripts/prepare_data.py --skip-model       # skip model download
   python scripts/prepare_data.py --skip-data        # skip dataset download
 """
@@ -224,8 +227,8 @@ def prepare_ntp_data(test_mode: bool = False):
 
 
 # ── 3. QA data ────────────────────────────────────────────────────────
-def _convert_squad(dataset, max_n: int = 0):
-    """Convert SQuAD-format dataset to [{context, question, answer}]."""
+def _convert_squad(dataset, max_n: int = 0, source: str = "squad"):
+    """Convert SQuAD-format dataset to [{context, question, answer, source}]."""
     samples = []
     for row in dataset:
         if max_n and len(samples) >= max_n:
@@ -237,11 +240,12 @@ def _convert_squad(dataset, max_n: int = 0):
             "context": row["context"],
             "question": row["question"],
             "answer": answers[0],
+            "source": source,
         })
     return samples
 
 
-def _convert_cmrc_or_drcd(dataset, max_n: int = 0):
+def _convert_cmrc_or_drcd(dataset, max_n: int = 0, source: str = "cmrc"):
     """Convert CMRC2018 / DRCD dataset (SQuAD-like, answers.text)."""
     samples = []
     for row in dataset:
@@ -254,11 +258,12 @@ def _convert_cmrc_or_drcd(dataset, max_n: int = 0):
             "context": row["context"],
             "question": row["question"],
             "answer": answers[0],
+            "source": source,
         })
     return samples
 
 
-def _convert_dureader(dataset, max_n: int = 0):
+def _convert_dureader(dataset, max_n: int = 0, source: str = "dureader"):
     """Convert DuReader-robust dataset."""
     samples = []
     for row in dataset:
@@ -274,11 +279,13 @@ def _convert_dureader(dataset, max_n: int = 0):
             "context": row["context"],
             "question": row["question"],
             "answer": answers[0],
+            "source": source,
         })
     return samples
 
 
-def _convert_triviaqa(dataset, max_n: int = 0, max_context_chars: int = 32000):
+def _convert_triviaqa(dataset, max_n: int = 0, max_context_chars: int = 32000,
+                      source: str = "triviaqa"):
     """Convert TriviaQA RC dataset.
 
     Extracts context from entity_pages.wiki_context or search_results.search_context.
@@ -308,6 +315,7 @@ def _convert_triviaqa(dataset, max_n: int = 0, max_context_chars: int = 32000):
             "context": context,
             "question": row["question"],
             "answer": answer_val,
+            "source": source,
         })
     return samples
 
@@ -330,8 +338,8 @@ def prepare_qa_data(test_mode: bool = False):
 
     # ── SQuAD v1.1 ──
     print("[QA] Loading SQuAD v1.1 ...")
-    sq_train = _convert_squad(load_dataset("rajpurkar/squad", split="train"), max_train)
-    sq_dev = _convert_squad(load_dataset("rajpurkar/squad", split="validation"), max_dev)
+    sq_train = _convert_squad(load_dataset("rajpurkar/squad", split="train"), max_train, source="squad")
+    sq_dev = _convert_squad(load_dataset("rajpurkar/squad", split="validation"), max_dev, source="squad")
     train_all.extend(sq_train)
     dev_all.extend(sq_dev)
     print(f"  → SQuAD: train={len(sq_train):,}, dev={len(sq_dev):,}")
@@ -340,8 +348,8 @@ def prepare_qa_data(test_mode: bool = False):
     if not test_mode:
         try:
             print("[QA] Loading CMRC2018 ...")
-            cm_train = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="train"))
-            cm_dev = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="validation"))
+            cm_train = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="train"), source="cmrc")
+            cm_dev = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="validation"), source="cmrc")
             train_all.extend(cm_train)
             dev_all.extend(cm_dev)
             print(f"  → CMRC2018: train={len(cm_train):,}, dev={len(cm_dev):,}")
@@ -356,8 +364,8 @@ def prepare_qa_data(test_mode: bool = False):
             loaded = False
             for repo in ["PaddlePaddle/dureader_robust", "luozhouyang/dureader"]:
                 try:
-                    d_train = _convert_dureader(load_dataset(repo, split="train"))
-                    d_dev = _convert_dureader(load_dataset(repo, split="validation"))
+                    d_train = _convert_dureader(load_dataset(repo, split="train"), source="dureader")
+                    d_dev = _convert_dureader(load_dataset(repo, split="validation"), source="dureader")
                     train_all.extend(d_train)
                     dev_all.extend(d_dev)
                     print(f"  → DuReader ({repo}): train={len(d_train):,}, dev={len(d_dev):,}")
@@ -379,8 +387,8 @@ def prepare_qa_data(test_mode: bool = False):
                                         split="train", streaming=True)
             tqa_dev_ds = load_dataset("trivia_qa", "rc",
                                       split="validation", streaming=True)
-            tqa_train = _convert_triviaqa(tqa_train_ds)
-            tqa_dev = _convert_triviaqa(tqa_dev_ds)
+            tqa_train = _convert_triviaqa(tqa_train_ds, source="triviaqa")
+            tqa_dev = _convert_triviaqa(tqa_dev_ds, source="triviaqa")
             train_all.extend(tqa_train)
             dev_all.extend(tqa_dev)
             print(f"  → TriviaQA: train={len(tqa_train):,}, dev={len(tqa_dev):,}")
@@ -404,8 +412,8 @@ def prepare_qa_data(test_mode: bool = False):
                 break
             try:
                 print(f"[QA] Loading DRCD from {repo_name} ...")
-                dr_train = _convert_cmrc_or_drcd(load_train())
-                dr_dev = _convert_cmrc_or_drcd(load_dev())
+                dr_train = _convert_cmrc_or_drcd(load_train(), source="drcd")
+                dr_dev = _convert_cmrc_or_drcd(load_dev(), source="drcd")
                 train_all.extend(dr_train)
                 dev_all.extend(dr_dev)
                 print(f"  → DRCD ({repo_name}): train={len(dr_train):,}, dev={len(dr_dev):,}")
@@ -436,19 +444,13 @@ def prepare_qa_data(test_mode: bool = False):
     print()
 
 
-# ── 4. Make tiny subset from existing data ─────────────────────────────
-def make_tiny_subset(ntp_n: int = 500, qa_train_n: int = 500,
-                     qa_dev_n: int = 100, seed: int = 42):
-    """Extract small subsets from existing local data for fast HP tuning.
+# ── helpers ─────────────────────────────────────────────────────────────
 
-    NTP: uses reservoir sampling to avoid loading 5.8GB into memory.
-    QA:  uses random.sample on the JSON arrays (already fits in memory).
-    """
+def _check_source_files():
+    """Check that full data files exist; return list of missing paths."""
     ntp_src = DATA_DIR / "ntp_train.jsonl"
     qa_train_src = DATA_DIR / "qa_train.json"
     qa_dev_src = DATA_DIR / "qa_dev.json"
-
-    # Check that source files exist
     missing = [p for p in [ntp_src, qa_train_src, qa_dev_src] if not p.exists()]
     if missing:
         print("ERROR: Source files not found:")
@@ -456,59 +458,114 @@ def make_tiny_subset(ntp_n: int = 500, qa_train_n: int = 500,
             print(f"  {p}")
         print("\nPlease run full data preparation first:")
         print("  python scripts/prepare_data.py")
+    return missing
+
+
+def _reservoir_sample(filepath, n, rng):
+    """Reservoir-sample n lines from a JSONL file."""
+    reservoir = []
+    line_count = 0
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            line_count += 1
+            if len(reservoir) < n:
+                reservoir.append(line)
+            else:
+                j = rng.randint(0, line_count - 1)
+                if j < n:
+                    reservoir[j] = line
+    return reservoir, line_count
+
+
+def _stratified_sample_qa(data, n, rng):
+    """Stratified sample from QA data by 'source' field."""
+    by_source = {}
+    for item in data:
+        src = item.get("source", "unknown")
+        by_source.setdefault(src, []).append(item)
+
+    result = []
+    # Proportional allocation
+    remaining = n
+    sources = sorted(by_source.keys())
+    for i, src in enumerate(sources):
+        items = by_source[src]
+        if i == len(sources) - 1:
+            alloc = remaining
+        else:
+            alloc = max(1, round(len(items) / len(data) * n))
+            alloc = min(alloc, remaining)
+        sampled = rng.sample(items, min(alloc, len(items)))
+        result.extend(sampled)
+        remaining -= len(sampled)
+
+    rng.shuffle(result)
+    return result[:n]
+
+
+def _write_jsonl(data_lines, path):
+    """Write list of JSON strings to a JSONL file."""
+    with open(path, "w", encoding="utf-8") as f:
+        for line in data_lines:
+            f.write(line + "\n")
+
+
+def _write_json(data, path):
+    """Write a JSON list to file."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def _print_file_info(path, label=None):
+    """Print file size info."""
+    name = label or path.name
+    size = path.stat().st_size
+    if size > 1e6:
+        print(f"  → {name}: {size / 1e6:.1f} MB")
+    else:
+        print(f"  → {name}: {size / 1e3:.1f} KB")
+
+
+# ── 4. Make tiny subset from existing data ─────────────────────────────
+def make_tiny_subset(ntp_n: int = 50, qa_train_n: int = 50,
+                     qa_dev_n: int = 20, seed: int = 42):
+    """Extract tiny subsets (~50 samples) for pipeline smoke tests.
+
+    NTP: uses reservoir sampling to avoid loading 5.8GB into memory.
+    QA:  uses random.sample on the JSON arrays (already fits in memory).
+    """
+    if _check_source_files():
         return
 
     rng = random.Random(seed)
 
     # ── NTP: reservoir sampling ──
     ntp_out = DATA_DIR / "ntp_tiny.jsonl"
-    print(f"[Tiny] Sampling {ntp_n} lines from {ntp_src.name} (reservoir sampling) ...")
-    reservoir = []
-    line_count = 0
-    with open(ntp_src, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            line_count += 1
-            if len(reservoir) < ntp_n:
-                reservoir.append(line)
-            else:
-                j = rng.randint(0, line_count - 1)
-                if j < ntp_n:
-                    reservoir[j] = line
-    with open(ntp_out, "w", encoding="utf-8") as f:
-        for line in reservoir:
-            f.write(line + "\n")
-    print(f"  → {ntp_out.name}: {len(reservoir)} lines "
-          f"(sampled from {line_count:,}), "
-          f"{ntp_out.stat().st_size / 1e3:.1f} KB")
+    print(f"[Tiny] Sampling {ntp_n} lines from ntp_train.jsonl (reservoir sampling) ...")
+    reservoir, line_count = _reservoir_sample(DATA_DIR / "ntp_train.jsonl", ntp_n, rng)
+    _write_jsonl(reservoir, ntp_out)
+    print(f"  → {ntp_out.name}: {len(reservoir)} lines (from {line_count:,})")
 
     # ── QA train: random.sample ──
     qa_train_out = DATA_DIR / "qa_tiny_train.json"
-    print(f"[Tiny] Sampling {qa_train_n} from {qa_train_src.name} ...")
-    with open(qa_train_src, "r", encoding="utf-8") as f:
+    print(f"[Tiny] Sampling {qa_train_n} from qa_train.json ...")
+    with open(DATA_DIR / "qa_train.json", "r", encoding="utf-8") as f:
         qa_train_data = json.load(f)
     n = min(qa_train_n, len(qa_train_data))
-    qa_train_sample = rng.sample(qa_train_data, n)
-    with open(qa_train_out, "w", encoding="utf-8") as f:
-        json.dump(qa_train_sample, f, ensure_ascii=False)
-    print(f"  → {qa_train_out.name}: {n} samples "
-          f"(from {len(qa_train_data):,}), "
-          f"{qa_train_out.stat().st_size / 1e3:.1f} KB")
+    _write_json(rng.sample(qa_train_data, n), qa_train_out)
+    print(f"  → {qa_train_out.name}: {n} samples (from {len(qa_train_data):,})")
 
     # ── QA dev: random.sample ──
     qa_dev_out = DATA_DIR / "qa_tiny_dev.json"
-    print(f"[Tiny] Sampling {qa_dev_n} from {qa_dev_src.name} ...")
-    with open(qa_dev_src, "r", encoding="utf-8") as f:
+    print(f"[Tiny] Sampling {qa_dev_n} from qa_dev.json ...")
+    with open(DATA_DIR / "qa_dev.json", "r", encoding="utf-8") as f:
         qa_dev_data = json.load(f)
     n = min(qa_dev_n, len(qa_dev_data))
-    qa_dev_sample = rng.sample(qa_dev_data, n)
-    with open(qa_dev_out, "w", encoding="utf-8") as f:
-        json.dump(qa_dev_sample, f, ensure_ascii=False)
-    print(f"  → {qa_dev_out.name}: {n} samples "
-          f"(from {len(qa_dev_data):,}), "
-          f"{qa_dev_out.stat().st_size / 1e3:.1f} KB")
+    _write_json(rng.sample(qa_dev_data, n), qa_dev_out)
+    print(f"  → {qa_dev_out.name}: {n} samples (from {len(qa_dev_data):,})")
 
     print()
     print("Tiny subset files ready:")
@@ -517,7 +574,133 @@ def make_tiny_subset(ntp_n: int = 500, qa_train_n: int = 500,
     print()
 
 
-# ── 5. Summary ─────────────────────────────────────────────────────────
+# ── 5. Make dev subset ─────────────────────────────────────────────────
+def make_dev_subset(ntp_n: int = 2000, qa_dev_n: int = 500, seed: int = 42):
+    """Create representative dev subsets for HP tuning evaluation.
+
+    NTP: stratified by document length (short <1K / mid 1K-10K / long >10K chars).
+    QA:  stratified by source field.
+    """
+    if _check_source_files():
+        return
+
+    rng = random.Random(seed)
+
+    # ── NTP: stratified by doc length ──
+    ntp_out = DATA_DIR / "ntp_dev.jsonl"
+    print(f"[Dev] Building {ntp_n}-line NTP dev set (stratified by doc length) ...")
+
+    # Bucket documents
+    buckets = {"short": [], "mid": [], "long": []}
+    line_count = 0
+    with open(DATA_DIR / "ntp_train.jsonl", "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            line_count += 1
+            try:
+                doc_len = len(json.loads(line).get("text", ""))
+            except json.JSONDecodeError:
+                continue
+            if doc_len < 1000:
+                buckets["short"].append(line)
+            elif doc_len < 10000:
+                buckets["mid"].append(line)
+            else:
+                buckets["long"].append(line)
+
+    # Proportional allocation with minimum 1 per bucket
+    total_in_buckets = sum(len(v) for v in buckets.values())
+    result = []
+    remaining = ntp_n
+    bucket_names = sorted(buckets.keys())
+    for i, bname in enumerate(bucket_names):
+        items = buckets[bname]
+        if not items:
+            continue
+        if i == len(bucket_names) - 1:
+            alloc = remaining
+        else:
+            alloc = max(1, round(len(items) / max(total_in_buckets, 1) * ntp_n))
+            alloc = min(alloc, remaining)
+        sampled = rng.sample(items, min(alloc, len(items)))
+        result.extend(sampled)
+        remaining -= len(sampled)
+        print(f"    {bname}: {len(items):,} total → sampled {len(sampled)}")
+
+    rng.shuffle(result)
+    _write_jsonl(result, ntp_out)
+    print(f"  → {ntp_out.name}: {len(result)} lines (from {line_count:,})")
+
+    # ── QA dev: stratified by source ──
+    qa_out = DATA_DIR / "qa_dev_hp.json"
+    print(f"[Dev] Building {qa_dev_n}-sample QA dev set (stratified by source) ...")
+    with open(DATA_DIR / "qa_dev.json", "r", encoding="utf-8") as f:
+        qa_dev_data = json.load(f)
+
+    sampled = _stratified_sample_qa(qa_dev_data, qa_dev_n, rng)
+    _write_json(sampled, qa_out)
+    print(f"  → {qa_out.name}: {len(sampled)} samples (from {len(qa_dev_data):,})")
+    print()
+
+
+# ── 6. Make ablation subset ────────────────────────────────────────────
+def make_ablation_subset(ntp_n: int = 1000, qa_train_n: int = 1000,
+                         qa_dev_n: int = 200, seed: int = 123):
+    """Create fixed ablation subsets with a different seed for independence.
+
+    Writes to data/ablation/ directory.
+    """
+    if _check_source_files():
+        return
+
+    rng = random.Random(seed)
+    ablation_dir = DATA_DIR / "ablation"
+    ablation_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── NTP ──
+    ntp_out = ablation_dir / "ntp_ablation.jsonl"
+    print(f"[Ablation] Sampling {ntp_n} NTP lines (seed={seed}) ...")
+    reservoir, line_count = _reservoir_sample(DATA_DIR / "ntp_train.jsonl", ntp_n, rng)
+    _write_jsonl(reservoir, ntp_out)
+    print(f"  → {ntp_out.name}: {len(reservoir)} lines (from {line_count:,})")
+
+    # ── QA train ──
+    qa_train_out = ablation_dir / "qa_ablation_train.json"
+    print(f"[Ablation] Sampling {qa_train_n} QA train (seed={seed}) ...")
+    with open(DATA_DIR / "qa_train.json", "r", encoding="utf-8") as f:
+        qa_train_data = json.load(f)
+    sampled = _stratified_sample_qa(qa_train_data, qa_train_n, rng)
+    _write_json(sampled, qa_train_out)
+    print(f"  → {qa_train_out.name}: {len(sampled)} samples (from {len(qa_train_data):,})")
+
+    # ── QA dev ──
+    qa_dev_out = ablation_dir / "qa_ablation_dev.json"
+    print(f"[Ablation] Sampling {qa_dev_n} QA dev (seed={seed}) ...")
+    with open(DATA_DIR / "qa_dev.json", "r", encoding="utf-8") as f:
+        qa_dev_data = json.load(f)
+    sampled = _stratified_sample_qa(qa_dev_data, qa_dev_n, rng)
+    _write_json(sampled, qa_dev_out)
+    print(f"  → {qa_dev_out.name}: {len(sampled)} samples (from {len(qa_dev_data):,})")
+    print()
+
+
+# ── 7. Make all subsets at once ────────────────────────────────────────
+def make_all_subsets():
+    """Generate all subsets (tiny, dev, ablation) in one go."""
+    print("=" * 60)
+    print("Generating all subsets...")
+    print("=" * 60)
+    print()
+    make_tiny_subset()
+    make_dev_subset()
+    make_ablation_subset()
+    print("All subsets created.")
+    print()
+
+
+# ── Summary ─────────────────────────────────────────────────────────────
 def print_summary():
     print("=" * 60)
     print("Preparation complete! File summary:")
@@ -531,6 +714,17 @@ def print_summary():
                 print(f"  {path.name:30s}  {size/1e6:.1f} MB")
             else:
                 print(f"  {path.name:30s}  {size/1e3:.1f} KB")
+    # Print ablation subdirectory
+    ablation_dir = DATA_DIR / "ablation"
+    if ablation_dir.exists():
+        for path in sorted(ablation_dir.glob("*")):
+            if path.is_file():
+                size = path.stat().st_size
+                name = f"ablation/{path.name}"
+                if size > 1e6:
+                    print(f"  {name:30s}  {size/1e6:.1f} MB")
+                else:
+                    print(f"  {name:30s}  {size/1e3:.1f} KB")
     if MODEL_DIR.exists():
         total = sum(f.stat().st_size for f in MODEL_DIR.rglob("*") if f.is_file())
         print(f"  {'models/Qwen3-0.6B/':30s}  {total/1e9:.2f} GB")
@@ -544,19 +738,34 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="Test mode: small subsets only")
     parser.add_argument("--make-tiny", action="store_true",
-                        help="Extract tiny subsets from existing local data for HP tuning")
+                        help="Extract ~50 sample subsets for pipeline smoke tests")
+    parser.add_argument("--make-dev", action="store_true",
+                        help="Extract ~500-2000 representative dev subsets for HP tuning")
+    parser.add_argument("--make-ablation", action="store_true",
+                        help="Extract ~1000 fixed-seed subsets for ablation experiments")
+    parser.add_argument("--make-all-subsets", action="store_true",
+                        help="Generate all subsets (tiny, dev, ablation) at once")
     parser.add_argument("--skip-model", action="store_true", help="Skip model download")
     parser.add_argument("--skip-data", action="store_true", help="Skip data preparation")
     args = parser.parse_args()
 
-    # ── make-tiny mode: extract subsets and exit ──
-    if args.make_tiny:
+    # ── subset generation modes (extract from existing data and exit) ──
+    subset_mode = args.make_tiny or args.make_dev or args.make_ablation or args.make_all_subsets
+    if subset_mode:
         print("=" * 60)
-        print("Deep Compressor — Extract Tiny Subset")
+        print("Deep Compressor — Subset Generation")
         print(f"Project root: {PROJECT_ROOT}")
         print("=" * 60)
         print()
-        make_tiny_subset()
+        if args.make_all_subsets:
+            make_all_subsets()
+        else:
+            if args.make_tiny:
+                make_tiny_subset()
+            if args.make_dev:
+                make_dev_subset()
+            if args.make_ablation:
+                make_ablation_subset()
         print_summary()
         return
 

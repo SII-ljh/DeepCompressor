@@ -23,3 +23,40 @@ class DownProj(nn.Module):
             (batch, seq_len, perceiver_dim)
         """
         return self.net(x)
+
+
+class IdentityProj(nn.Module):
+    """Identity projection — passes input through unchanged (requires qwen_dim == perceiver_dim)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class LinearProj(nn.Module):
+    """Single linear projection with LayerNorm."""
+
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def build_down_proj(mode: str, qwen_dim: int, perceiver_dim: int,
+                    hidden_dim: int, dropout: float) -> nn.Module:
+    """Factory function for down-projection modules.
+
+    Args:
+        mode: "mlp" | "linear" | "identity"
+    """
+    if mode == "mlp":
+        return DownProj(qwen_dim, perceiver_dim, hidden_dim, dropout)
+    elif mode == "linear":
+        return LinearProj(qwen_dim, perceiver_dim)
+    elif mode == "identity":
+        return IdentityProj()
+    raise ValueError(f"Unknown down_proj_mode: {mode}")
