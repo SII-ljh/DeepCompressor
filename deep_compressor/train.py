@@ -110,7 +110,8 @@ def _build_forward_kwargs(batch, mode: str, completed_steps: int):
 def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                 train_loader: DataLoader, accelerator: Accelerator,
                 mode: str, eval_loader: DataLoader = None,
-                tokenizer=None, optuna_callback=None):
+                tokenizer=None, optuna_callback=None,
+                diagnostic_callback=None):
     """Train one stage (NTP or QA).
 
     Args:
@@ -118,6 +119,7 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
         eval_loader: optional DataLoader for validation
         tokenizer: required for QA eval (decoding generated tokens)
         optuna_callback: optional callable(step, metrics) for Optuna pruning
+        diagnostic_callback: optional callable(step, model, accelerator) -> dict
     """
     tcfg = config.training
 
@@ -236,6 +238,21 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                     last_metrics = metrics
                     model.train()
 
+                    # Diagnostic callback (mid-training diagnostics)
+                    if diagnostic_callback is not None:
+                        try:
+                            diag_results = diagnostic_callback(
+                                completed_steps, model, accelerator)
+                            if diag_results and accelerator.is_main_process:
+                                accelerator.log(
+                                    {f"diagnostic/{k}": v
+                                     for k, v in diag_results.items()
+                                     if isinstance(v, (int, float))},
+                                    step=completed_steps,
+                                )
+                        except Exception as e:
+                            logger.warning(f"Diagnostic callback failed: {e}")
+
                     # Optuna pruning callback
                     if optuna_callback is not None:
                         optuna_callback(completed_steps, metrics)
@@ -254,7 +271,8 @@ def _run_training(config: DeepCompressorConfig,
                   max_eval_samples: int = 0,
                   max_train_samples: int = 0,
                   wandb_conf=None,
-                  optuna_callback=None):
+                  optuna_callback=None,
+                  diagnostic_callback=None):
     """Core training function shared by legacy argparse and Hydra entry points.
 
     Args:
@@ -266,6 +284,7 @@ def _run_training(config: DeepCompressorConfig,
         max_train_samples: limit training samples (0 = all)
         wandb_conf: optional wandb configuration (object with .enabled, .project, etc.)
         optuna_callback: optional callable(step, metrics) for Optuna pruning
+        diagnostic_callback: optional callable(step, model, accelerator) -> dict
 
     Returns:
         dict or None: last evaluation metrics (useful for Optuna)
@@ -397,7 +416,8 @@ def _run_training(config: DeepCompressorConfig,
         _, last_metrics = train_stage(
             config, model, loader, accelerator, mode="ntp",
             eval_loader=eval_loader, tokenizer=tokenizer,
-            optuna_callback=optuna_callback)
+            optuna_callback=optuna_callback,
+            diagnostic_callback=diagnostic_callback)
 
     elif tcfg.stage == 2:
         dataset = QADataset(data_path, tokenizer,
@@ -435,7 +455,8 @@ def _run_training(config: DeepCompressorConfig,
         _, last_metrics = train_stage(
             config, model, loader, accelerator, mode="qa",
             eval_loader=eval_loader, tokenizer=tokenizer,
-            optuna_callback=optuna_callback)
+            optuna_callback=optuna_callback,
+            diagnostic_callback=diagnostic_callback)
 
     else:
         raise ValueError(f"Unknown stage: {tcfg.stage}")
@@ -478,6 +499,13 @@ def main_legacy():
                         help="wandb run name")
     parser.add_argument("--wandb_offline", action="store_true",
                         help="Use wandb in offline mode")
+    # Diagnostic callback options
+    parser.add_argument("--diagnostic_every", type=int, default=0,
+                        help="Run mid-training diagnostics every N steps (0 = off)")
+    parser.add_argument("--diagnostic_data_path", type=str, default=None,
+                        help="Data path for diagnostic callback (defaults to --data_path)")
+    parser.add_argument("--diagnostic_experiments", type=str, default="4,5",
+                        help="Comma-separated mid-training experiments to run")
     args = parser.parse_args()
 
     config = DeepCompressorConfig.from_yaml(args.config)
@@ -497,6 +525,18 @@ def main_legacy():
             offline=args.wandb_offline,
         )
 
+    # Build diagnostic callback if requested
+    diag_callback = None
+    if args.diagnostic_every > 0:
+        from scripts.diagnostics.mid_training import create_mid_training_callback
+        diag_data = args.diagnostic_data_path or args.data_path
+        diag_experiments = tuple(
+            e.strip() for e in args.diagnostic_experiments.split(","))
+        diag_callback = create_mid_training_callback(
+            config, diag_data, experiments=diag_experiments,
+            run_every=args.diagnostic_every,
+        )
+
     _run_training(
         config=config,
         data_path=args.data_path,
@@ -505,6 +545,7 @@ def main_legacy():
         max_eval_samples=args.max_eval_samples,
         max_train_samples=args.max_train_samples,
         wandb_conf=wandb_conf,
+        diagnostic_callback=diag_callback,
     )
 
 

@@ -616,6 +616,13 @@ ALL_EXPERIMENTS = ["1", "2", "3", "4", "5"]
 
 
 def main():
+    import warnings
+    warnings.warn(
+        "scripts/diagnostic.py is deprecated. "
+        "Use scripts/diagnostics/pre_training.py, mid_training.py, or post_training.py instead.",
+        DeprecationWarning, stacklevel=1,
+    )
+
     parser = argparse.ArgumentParser(description="Deep Compressor diagnostics")
     parser.add_argument("--config",     default="configs/tiny_subset.yaml")
     parser.add_argument("--data_path",  default="data/ntp_train.jsonl")

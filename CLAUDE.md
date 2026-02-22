@@ -4,15 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Deep Compressor** -- a system for compressing ultra-long financial texts (8K-64K tokens) into fixed-length latent vector sequences that serve as prefixes for a frozen Qwen decoder to answer detail-level financial questions. Teacher distillation ensures the compressed prefix carries information equivalent to the full document. FinBERT entity guidance is an optional enhancement module (default OFF).
+**Deep Compressor** — compresses ultra-long financial texts (8K-64K tokens) into fixed-length latent vector sequences that serve as prefixes for a frozen Qwen decoder to answer detail-level financial questions. Teacher distillation ensures the compressed prefix carries information equivalent to the full document. FinBERT entity guidance is an optional enhancement module (default OFF).
 
-The architectural plan lives in `plan.md`. The `FinBERT/` subdirectory is a cloned reference repo ([valuesimplex/FinBERT2](https://github.com/valuesimplex/FinBERT2)) used for NER and entity-level features.
+The architectural plan lives in `plan.md` (Chinese). The `FinBERT/` subdirectory is a cloned reference repo ([valuesimplex/FinBERT2](https://github.com/valuesimplex/FinBERT2)) used for NER and entity-level features.
 
 ## Environment Setup
 
 ```bash
 conda create --name FinBERT python=3.11
 conda activate FinBERT
+pip install -r FinBERT/requirements.txt
 pip install -r requirements.txt
 ```
 
@@ -21,137 +22,105 @@ The conda env is at `/opt/homebrew/anaconda3/envs/FinBERT`. Use its Python direc
 /opt/homebrew/anaconda3/envs/FinBERT/bin/python <script>
 ```
 
-## Key Dependencies
+## Testing
 
-torch >=2.0, transformers >=4.40, datasets >=2.20, sentence-transformers >=3.0, accelerate >=0.20, sentencepiece, jieba, bertopic, scikit-learn, pandas, numpy, optuna, wandb (optional).
-
-## Project Structure
-
-```
-deep_compressor/              # Core library
-  config.py                   # Dataclass configs (QwenConfig, PerceiverConfig, AblationConfig, etc.)
-  hydra_conf.py               # Hydra structured config (mirrors config.py for CLI overrides)
-  data.py                     # NTPDataset, QADataset, PaddingCollator
-  model.py                    # DeepCompressor main model
-  train.py                    # Training loop (_run_training)
-  loss.py                     # DistillationLoss, compute_total_loss
-  eval.py                     # Evaluation metrics (EM, F1)
-  modules/
-    down_proj.py              # DownProj, IdentityProj, LinearProj, build_down_proj()
-    up_mlp.py                 # UpMLP, build_up_proj()
-    query_init.py             # QueryInit (learnable base queries + question bias)
-    perceiver.py              # GuidedPerceiver (Stage A/B/C with enable flags)
-    anchor_align.py           # AnchorAlign (FinBERT optional)
-    ner_head.py               # NERHead (FinBERT optional)
-    fact_decode_head.py        # FactDecodeHead (FinBERT optional)
-    tokenizer_align.py         # FinBERT-Qwen tokenizer alignment
-
-configs/                      # YAML configuration files
-  default.yaml                # Full training config
-  tiny_subset.yaml            # Quick iteration config (tiny data)
-  macbook_debug.yaml          # Local debug config (CPU/MPS)
-  ablation_base.yaml          # Ablation experiments base config
-  benchmark.yaml              # Benchmark evaluation config
-  hp_search.yaml              # Hyperparameter search config
-
-scripts/
-  prepare_data.py             # Data download & subset generation
-  diagnostic.py               # 5 diagnostic experiments (overfit, bottleneck, gradient flow, attention, fidelity)
-  hp_search.py                # Optuna HP search with wandb integration
-  ablation.py                 # Ablation experiment runner (17 registered experiments)
-  benchmark.py                # Baseline comparison (direct_qwen, random_prefix, pool baselines, deep_compressor)
-  visualize_architecture.py   # Architecture diagram generation
-
-tests/                        # Unit tests (pytest)
-```
-
-## Architecture
-
-The data flow has five stages:
-
-1. **Document Encoding** -- Frozen Qwen encoder -> hidden states -> `DownProj` -> `byte_array` in Perceiver dimension.
-2. **Entity Guidance (optional)** -- Frozen FinBERT + NER Head -> `anchor_embs` (via `AnchorAlign`) + `anchor_scores`. Default OFF.
-3. **Query Encoding** -- Frozen Qwen encoder -> mean-pooled question vector -> `QueryInit` (learnable base queries + question additive bias) -> initial query vectors.
-4. **Compression** -- `GuidedPerceiver` with three stages:
-   - Stage A: global cross-attention from `byte_array` (with optional `anchor_scores` bias) + self-attention.
-   - Stage B: anchor refinement cross-attention (FinBERT ON) or extra self-attention (FinBERT OFF).
-   - Stage C: deep reasoning cross-attention back to `byte_array` + multi-layer self-attention -> fixed-length `latent_array`.
-5. **Generation** -- `UpMLP` maps `latent_array` back to Qwen dimension -> prefix + question tokens -> frozen Qwen decoder -> answer.
-
-### Ablation Infrastructure
-
-The `AblationConfig` dataclass controls experimental switches:
-- **Projection modes**: `down_proj_mode` / `up_proj_mode` -- "mlp" (default), "linear", or "identity"
-- **Query conditioning**: `query_condition_on_question` -- toggle question-conditioned query bias
-- **Perceiver stage enables**: `enable_stage_a/b/c` -- disable individual Perceiver stages
-- **Layer count overrides**: `override_stage_*_layers` -- override default layer counts (0 = use defaults)
-- **Distillation toggles**: `enable_kl_distillation` / `enable_hidden_mse_distillation`
-- **Query count override**: `override_num_queries` -- override default num_queries (0 = use defaults)
-
-Factory functions `build_down_proj()` and `build_up_proj()` create projection modules based on the ablation mode. `DeepCompressorConfig` provides computed properties (`effective_num_queries`, `effective_stage_*_layers`) that resolve overrides.
-
-### Distillation
-
-Teacher is the same frozen Qwen reading the full uncompressed document. Two distillation losses:
-- **Output distribution**: KL divergence on answer token logits (temperature-scaled).
-- **Hidden state alignment**: MSE on shared question+answer token positions across selected decoder layers.
-
-### Training Strategy
-
-- **Stage 1 (NTP Pretraining)**: compress document -> prefix -> next-token prediction on random document segments. No labels needed. Solves cold-start problem.
-- **Stage 2 (QA Fine-tuning + Distillation)**: joint training with QA cross-entropy + KL distillation + hidden-state MSE (weight ramped from 0). Uses SQuAD, CMRC2018, DuReader, TriviaQA, DRCD.
-
-## Data Subsets
-
-Generated by `scripts/prepare_data.py`:
-
-```
-data/
-  ntp_train.jsonl              # Full NTP training data
-  qa_train.json                # Full QA training data
-  qa_dev.json                  # Full QA dev data
-  ntp_tiny.jsonl               # 50 samples (pipeline smoke test)
-  qa_tiny_train.json           # 50 samples
-  qa_tiny_dev.json             # 20 samples
-  ntp_dev.jsonl                # 2000 samples, stratified by doc length
-  qa_dev_hp.json               # 500 samples, stratified by source
-  ablation/
-    ntp_ablation.jsonl         # 1000 samples (seed=123)
-    qa_ablation_train.json     # 1000 samples (seed=123)
-    qa_ablation_dev.json       # 200 samples (seed=123)
-```
-
-CLI flags:
 ```bash
-python scripts/prepare_data.py                    # full download
-python scripts/prepare_data.py --test             # small test subset
-python scripts/prepare_data.py --make-tiny        # ~50 samples
-python scripts/prepare_data.py --make-dev         # ~2000 NTP + 500 QA
-python scripts/prepare_data.py --make-ablation    # ablation subsets
-python scripts/prepare_data.py --make-all-subsets # generate all subsets
+# Run all tests (skips slow integration tests)
+python -m pytest tests/ -x -q
+
+# Include slow integration tests (require Qwen3-0.6B download)
+python -m pytest tests/ --runslow
+
+# Run specific test module
+python -m pytest tests/test_model.py -v
 ```
+
+67 tests across 14 files. Integration tests in `test_integration.py` are marked `@pytest.mark.slow` and skipped by default — they require the real Qwen model.
+
+**Test fixtures** (`tests/conftest.py`): `tiny_config` provides a `DeepCompressorConfig` with minimal dimensions (Qwen 64D/4 layers, Perceiver 32D/8 queries, FinBERT off) for fast unit tests. `tiny_config_finbert` is the same with FinBERT enabled. Tests use a `_MockQwenModel` in `test_model.py` that mimics the Qwen3 interface to avoid loading the real 600M-parameter model.
+
+## Training
+
+```bash
+# Stage 1: NTP Pretraining (compress doc -> prefix -> next-token prediction)
+python -m deep_compressor.train \
+    --config configs/<config>.yaml \
+    --data_path data/ntp_train.jsonl --stage 1
+
+# Stage 2: QA Fine-tuning + Distillation (requires Stage 1 checkpoint)
+python -m deep_compressor.train \
+    --config configs/default.yaml \
+    --data_path data/qa_train.json --eval_data_path data/qa_dev.json \
+    --stage 2 --resume_from outputs/checkpoint-final
+
+# Multi-GPU with Accelerate
+accelerate launch --multi_gpu --num_processes 4 \
+    -m deep_compressor.train --config configs/default.yaml \
+    --data_path data/ntp_train.jsonl --stage 1
+
+# With wandb tracking (append to any training command)
+--wandb --wandb_project deep-compressor
+
+# Hydra CLI overrides (alternative config path)
+python -m deep_compressor.train \
+    --config-path ../configs --config-name default \
+    training.learning_rate=1e-3 perceiver.num_queries=128
+```
+
+**Config files** — choose based on scenario:
+| Config | Use Case | Doc Tokens | Steps |
+|--------|----------|-----------|-------|
+| `default.yaml` | Full production training | 8192 | 50K |
+| `tiny_subset.yaml` | Quick iteration / HP tuning | 256 | 200 |
+| `macbook_debug.yaml` | Local MacBook validation (MPS) | 256 | 300 |
+| `ablation_base.yaml` | Ablation experiments | 512 | 500 |
+| `hp_search.yaml` | Hyperparameter search | 256 | 200 |
+| `benchmark.yaml` | Evaluation-only | 8192 | — |
+
+## Data Preparation
+
+```bash
+python scripts/prepare_data.py                    # full download (~1-2 hours)
+python scripts/prepare_data.py --test             # small test subset
+python scripts/prepare_data.py --make-tiny        # ~50 samples for pipeline smoke test
+python scripts/prepare_data.py --make-all-subsets # all subsets (tiny, dev, ablation)
+```
+
+Downloads Qwen3-0.6B to `models/Qwen3-0.6B/` and builds NTP/QA datasets into `data/`. Key subsets: `ntp_tiny.jsonl` (50 samples), `qa_tiny_*.json` (50/20 samples), `ablation/` (1000/200 samples).
 
 ## Running Experiments
 
-### Diagnostics (5 experiments)
+### Diagnostics (9 experiments, 3 phases)
+
 ```bash
-python scripts/diagnostic.py \
+# Pre-training (Exp 1-3): overfit, gradient flow, bottleneck
+python scripts/diagnostics/pre_training.py \
     --config configs/macbook_debug.yaml \
-    --data_path data/ntp_tiny.jsonl \
-    --steps 300 --experiments 1,2,3,4,5
+    --data_path data/ntp_tiny.jsonl --steps 300 --experiments 1,2,3
+
+# Mid-training (Exp 4-5): query diversity, stagewise info gain
+python scripts/diagnostics/mid_training.py \
+    --config configs/macbook_debug.yaml \
+    --data_path data/ntp_tiny.jsonl --experiments 4,5
+
+# Mid-training as callback during training
+python -m deep_compressor.train --config configs/tiny_subset.yaml \
+    --data_path data/ntp_tiny.jsonl --stage 1 \
+    --diagnostic_every 50 --diagnostic_experiments 4,5
+
+# Post-training (Exp 6-9): attention, fidelity, length scaling, distillation
+python scripts/diagnostics/post_training.py \
+    --config configs/benchmark.yaml \
+    --checkpoint outputs/checkpoint-final/trainable_weights.pt \
+    --eval_data data/qa_dev.json --experiments 6,7,8,9
 ```
 
-### Hyperparameter Search
-```bash
-python scripts/hp_search.py --n_trials 50 --stage 1 \
-    --config configs/hp_search.yaml \
-    --data_path data/ntp_tiny.jsonl \
-    --wandb --wandb_project dc-hp-search
-```
+Legacy `scripts/diagnostic.py` still works but emits a DeprecationWarning.
 
-### Ablation Experiments
+### Ablation, HP Search, Benchmark
+
 ```bash
-# List all available ablations
+# List all 17 ablation experiments
 python scripts/ablation.py --list
 
 # Run specific ablations
@@ -160,65 +129,67 @@ python scripts/ablation.py --stage 1 \
     --data_path data/ablation/ntp_ablation.jsonl \
     --ablation full_pipeline,no_stage_c,down_proj_identity
 
-# Run all ablations with wandb
-python scripts/ablation.py --stage 1 \
-    --data_path data/ablation/ntp_ablation.jsonl \
-    --wandb --wandb_project dc-ablation
-```
+# Hyperparameter search
+python scripts/hp_search.py --n_trials 50 --stage 1 \
+    --config configs/hp_search.yaml \
+    --data_path data/ntp_tiny.jsonl
 
-Available ablation experiments: `down_proj_identity`, `down_proj_linear`, `up_proj_identity`, `up_proj_linear`, `query_no_question`, `no_stage_a`, `no_stage_b`, `no_stage_c`, `shallow_perceiver`, `deep_perceiver`, `no_kl_distill`, `no_mse_distill`, `no_distillation`, `queries_16`, `queries_32`, `queries_128`, `full_pipeline`.
-
-### Benchmark Comparison
-```bash
+# Benchmark comparison (direct_qwen, random_prefix, pool baselines, deep_compressor)
 python scripts/benchmark.py \
     --config configs/benchmark.yaml \
     --checkpoint outputs/checkpoint-final/trainable_weights.pt \
-    --eval_data data/qa_dev.json \
-    --wandb --wandb_project dc-benchmark
+    --eval_data data/qa_dev.json
 ```
 
-Compares: `direct_qwen` (upper bound), `random_prefix` (lower bound), `mean_pool_linear`, `mean_pool_mlp`, `deep_compressor` (requires checkpoint).
+## Architecture
 
-## Testing
+### Data Flow (5 stages)
 
-```bash
-# Run all tests
-python -m pytest tests/ -x -q
+1. **Document Encoding** — Frozen Qwen encoder -> hidden states -> `DownProj` -> `byte_array` in Perceiver dimension.
+2. **Entity Guidance (optional, default OFF)** — Frozen FinBERT + NER Head -> `anchor_embs` (via `AnchorAlign`) + `anchor_scores`.
+3. **Query Encoding** — Frozen Qwen encoder -> mean-pooled question vector -> `QueryInit` (learnable base queries + question additive bias) -> initial query vectors.
+4. **Compression** — `GuidedPerceiver` with three stages:
+   - Stage A: global cross-attention from `byte_array` (with optional `anchor_scores` bias) + self-attention.
+   - Stage B: anchor refinement cross-attention (FinBERT ON) or extra self-attention (FinBERT OFF).
+   - Stage C: deep reasoning cross-attention back to `byte_array` + multi-layer self-attention -> fixed-length `latent_array`.
+5. **Generation** — `UpMLP` maps `latent_array` back to Qwen dimension -> prefix + question tokens -> frozen Qwen decoder -> answer.
 
-# Run specific test module
-python -m pytest tests/test_model.py -v
-```
+### Gradient Flow
 
-64 tests covering all modules, config validation, data loading, loss computation, eval metrics, and integration.
+Frozen Qwen forward passes run inside `torch.no_grad()` context managers. Trainable modules (`DownProj`, `QueryInit`, `GuidedPerceiver`, `UpMLP`) are called **outside** the no-grad context to preserve gradient flow. The teacher path (same frozen Qwen reading full uncompressed document) is inference-only with no gradients.
 
-## Configuration System
+### Distillation
 
-Two configuration paths:
-1. **YAML + `from_yaml()`**: Used by scripts (`train.py`, `ablation.py`, `benchmark.py`, etc.)
-2. **Hydra + `RunConf`**: Used for CLI override workflows via `hydra_conf.py`
+Two distillation losses (Stage 2 only):
+- **Output distribution**: KL divergence on answer token logits (temperature-scaled).
+- **Hidden state alignment**: MSE on shared question+answer token positions across selected decoder layers. Weight ramps linearly from 0 over `hidden_distill_ramp_steps` to avoid early training instability.
 
-Both paths produce a validated `DeepCompressorConfig` with `__post_init__` checks.
+### Configuration System
+
+Two paths producing the same validated `DeepCompressorConfig`:
+1. **YAML + `DeepCompressorConfig.from_yaml(path)`** — used by all scripts.
+2. **Hydra + `RunConf` in `hydra_conf.py`** — used for CLI override workflows.
+
+Config hierarchy: `DeepCompressorConfig` wraps `QwenConfig`, `FinBERTConfig`, `PerceiverConfig`, `ProjectionConfig`, `LossConfig`, `TrainingConfig`, `AblationConfig`. `__post_init__` validates constraints like `num_heads * head_dim == perceiver_dim`.
+
+### Ablation Infrastructure
+
+`AblationConfig` controls experimental switches: projection modes (`down_proj_mode`/`up_proj_mode`: mlp/linear/identity), query conditioning, Perceiver stage enables (`enable_stage_a/b/c`), layer count overrides, distillation toggles, query count override. `DeepCompressorConfig` provides `effective_*` computed properties that resolve overrides.
+
+Factory functions `build_down_proj()` and `build_up_proj()` create projection modules based on ablation mode.
 
 ## Implementation Notes
 
-- All frozen models (Qwen encoder/decoder, FinBERT) must have `requires_grad=False`. Only trainable modules: DownProj, QueryInit, GuidedPerceiver, UpMLP, and optionally AnchorAlign/NER Head/FactDecodeHead.
-- `encode_document()` and `encode_question()` use `torch.no_grad()` context managers around the frozen Qwen forward pass, then call trainable modules outside the context to preserve gradient flow.
-- Teacher path is inference-only (no gradients). For 64K inputs, pre-compute and cache Teacher logits/hidden states to manage GPU memory.
-- Hidden-state distillation weight should ramp gradually from 0 to avoid early training instability.
-- Tokenizer alignment between FinBERT and Qwen uses character-level span overlap (max aggregation).
-- Evaluation metrics: exact match for numeric questions, F1 for overall QA quality.
+- **Frozen vs trainable**: All Qwen/FinBERT params have `requires_grad=False`. Trainable: DownProj, QueryInit, GuidedPerceiver, UpMLP; optionally AnchorAlign, NERHead, FactDecodeHead.
+- **Checkpoint saving**: Only trainable weights are saved (skips `qwen.*` parameters).
+- **Lazy loading**: `NTPDataset` uses byte offsets into JSONL files to avoid loading multi-GB data into memory.
+- **Distributed training**: Uses HuggingFace `accelerate` for automatic DDP + device placement.
+- **Teacher caching**: For 64K inputs, pre-compute and cache teacher logits/hidden states to manage GPU memory.
+- **Tokenizer alignment**: FinBERT-Qwen alignment in `tokenizer_align.py` uses character-level span overlap with max aggregation.
+- **Evaluation metrics**: Exact match for numeric questions, F1 for overall QA quality. Chinese text normalization handled via jieba.
 
-## FinBERT Reference Repo
+## FinBERT Toggle
 
-```
-FinBERT/
-  Fin-NER/              # NER fine-tuning & inference (BIO tags)
-  Fin-labeler/          # Sentiment classification
-  Fin-retriever/        # Contrastive learning retrieval
-  Fin-Topicmodel/       # BERTopic-based topic modeling
-  FinBERT2/pretrain/    # MLM pretraining
-```
+Controlled by `finbert.enabled` config flag. When OFF (default): no FinBERT/NER/AnchorAlign modules loaded, Stage B degrades to self-attention, no anchor_scores bias, no auxiliary anchor reconstruction loss. System is fully functional without FinBERT.
 
-Entity types: ORG, PER, METRIC, VALUE, DATE, EVENT, PRODUCT.
-
-FinBERT toggle is controlled by `finbert.enabled` config flag. When OFF: no FinBERT/NER/AnchorAlign modules, Stage B degrades to self-attention, no anchor_scores bias, no auxiliary anchor reconstruction loss. System is fully functional without FinBERT.
+Entity types when enabled: ORG, PER, METRIC, VALUE, DATE, EVENT, PRODUCT.
