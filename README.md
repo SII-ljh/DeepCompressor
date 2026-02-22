@@ -113,25 +113,52 @@ python scripts/prepare_data.py --make-tiny
 # 跳过模型下载（如已有本地 Qwen3-0.6B）
 python scripts/prepare_data.py --skip-model
 
+# 生成消融实验子集（总数据的 15%）
+python scripts/prepare_data.py --make-ablation
+
 # 生成所有子集（tiny + dev + ablation）
 python scripts/prepare_data.py --make-all-subsets
 ```
 
 下载内容：
-- **模型**：Qwen3-0.6B → `models/Qwen3-0.6B/`
-- **NTP 数据（第一阶段）**：WikiText-103, SQuAD contexts, C4, CLUECorpusSmall → `data/ntp_train.jsonl`
-- **QA 数据（第二阶段）**：SQuAD, CMRC2018, DuReader, TriviaQA, DRCD → `data/qa_train.json`, `data/qa_dev.json`
+- **模型**：Qwen3-0.6B → `models/Qwen3-0.6B/`（~3 GB float32）
+- **NTP 数据（第一阶段）**→ `data/ntp_train.jsonl`
+- **QA 数据（第二阶段）**→ `data/qa_train.json`, `data/qa_dev.json`
 
-生成的数据子集：
+#### 训练数据集介绍
+
+**NTP 预训练数据（第一阶段）**：用于 next-token prediction 预训练，目标约 1.5B tokens。来源于四个公开语料库：
+
+| 数据集 | 语言 | 规模 | 说明 |
+|--------|------|------|------|
+| WikiText-103 | 英文 | ~130M tokens, ~28K 篇 | 维基百科长文，结构化百科知识 |
+| SQuAD v1.1 上下文 | 英文 | ~2M tokens, ~442 篇 | 阅读理解段落，按文章标题合并为长文档 |
+| C4 realnewslike | 英文 | ~700M tokens | Common Crawl 新闻子集，流式加载 |
+| CLUECorpusSmall | 中文 | ~500M tokens | 中文通用语料（CLUECorpusSmall），流式加载；如不可用则回退到 mc4 中文子集 |
+
+每条 NTP 样本是一篇文档的纯文本（`{"text": "..."}`），最短 200 字符。训练时从文档中随机截取一段作为续写目标。
+
+**QA 微调数据（第二阶段）**：用于问答微调和蒸馏训练。来源于五个开源抽取式问答数据集，覆盖中英文：
+
+| 数据集 | 语言 | 训练集 | 验证集 | 说明 |
+|--------|------|--------|--------|------|
+| SQuAD v1.1 | 英文 | 87,599 | 10,570 | 斯坦福问答数据集，基于维基百科段落 |
+| CMRC2018 | 中文 | 10,142 | 3,219 | 中文机器阅读理解，类 SQuAD 格式 |
+| DuReader-robust | 中文 | 14,520 | 1,417 | 百度鲁棒阅读理解数据集 |
+| TriviaQA RC | 英文 | ~95K | ~12K | 基于维基百科/网页证据的问答，上下文较长 |
+| DRCD | 繁体中文 | ~27K | ~4K | 台湾繁体中文阅读理解数据集 |
+
+每条 QA 样本包含四个字段：`context`（文档）、`question`（问题）、`answer`（答案）、`source`（来源数据集）。
+
+#### 数据子集
 
 | 文件 | 用途 | 样本数 |
 |------|------|--------|
 | `data/ntp_tiny.jsonl` | 管线冒烟测试 | 50 |
 | `data/qa_tiny_train.json` / `qa_tiny_dev.json` | 快速迭代 | 50 / 20 |
-| `data/ntp_dev.jsonl` | 开发集验证 | 2000 |
-| `data/qa_dev_hp.json` | 超参搜索验证 | 500 |
-| `data/ablation/ntp_ablation.jsonl` | 消融实验 | 1000 |
-| `data/ablation/qa_ablation_train.json` / `qa_ablation_dev.json` | 消融实验 | 1000 / 200 |
+| `data/ntp_dev.jsonl` | 开发集验证（按文档长度分层） | 2000 |
+| `data/qa_dev_hp.json` | 超参搜索验证（按来源分层） | 500 |
+| `data/ablation/` | 消融实验（总数据的 15%，按来源分层） | 自动计算 |
 
 ### 第三步：运行测试
 
