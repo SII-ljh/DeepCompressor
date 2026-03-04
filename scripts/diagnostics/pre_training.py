@@ -9,7 +9,7 @@ Usage:
     python scripts/diagnostics/pre_training.py \
         --config configs/macbook_debug.yaml \
         --data_path data/ntp_tiny.jsonl \
-        --steps 300 --experiments 1,2,3
+        --steps 2000 --probe_steps 300 --experiments 1,2,3
 """
 
 from __future__ import annotations
@@ -436,9 +436,14 @@ def run_bottleneck(
 
 def main():
     parser = base_parser("Deep Compressor pre-training diagnostics (Exp 1-3)")
-    parser.add_argument("--steps", type=int, default=300)
+    parser.add_argument("--steps", type=int, default=2000,
+                        help="Training steps for full pipeline (Exp 1)")
+    parser.add_argument("--probe_steps", type=int, default=300,
+                        help="Training steps for linear/MLP probes (Exp 3)")
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--log_every", type=int, default=20)
+    parser.add_argument("--min_doc_tokens", type=int, default=0,
+                        help="Skip docs shorter than this (0=no filter)")
     parser.add_argument(
         "--experiments",
         type=str,
@@ -456,7 +461,8 @@ def main():
         enabled=args.wandb,
         project=args.wandb_project,
         run_name="pre-training-diag",
-        config={"steps": args.steps, "lr": args.lr, "experiments": experiments},
+        config={"steps": args.steps, "probe_steps": args.probe_steps,
+                "lr": args.lr, "experiments": experiments},
         entity=args.wandb_entity,
     )
 
@@ -472,7 +478,8 @@ def main():
 
     print("\nPreparing single NTP batch...")
     batch, tokenizer = prepare_ntp_batch(
-        config, args.data_path, args.batch_size, device
+        config, args.data_path, args.batch_size, device,
+        min_doc_tokens=args.min_doc_tokens,
     )
     for k, v in batch.items():
         if torch.is_tensor(v):
@@ -508,7 +515,7 @@ def main():
     if "3" in experiments:
         torch.manual_seed(config.training.seed)
         exp3 = run_bottleneck(
-            model, doc_pooled, batch, device, args.steps, args.lr, args.log_every
+            model, doc_pooled, batch, device, args.probe_steps, args.lr, args.log_every
         )
         all_results["bottleneck"] = exp3
         if wandb_run:
@@ -522,7 +529,7 @@ def main():
             )
 
     # ── cross comparison (if experiments 1 & 3 were both run) ─────────
-    if "1" in all_results and "bottleneck" in all_results:
+    if "overfit" in all_results and "bottleneck" in all_results:
         overfit_final = all_results["overfit"]["losses"][-1]
         linear_final = all_results["bottleneck"]["linear_losses"][-1]
         mlp_final = all_results["bottleneck"]["mlp_losses"][-1]
@@ -530,15 +537,16 @@ def main():
 
         print("\n" + "=" * 76)
         print("  CROSS COMPARISON (Exp 1 vs Exp 3)")
+        print(f"  Pipeline: {args.steps} steps  |  Probes: {args.probe_steps} steps")
         print("=" * 76)
 
-        print(f"\n  {'Method':<35}  {'Loss':>10}")
-        print(f"  {'─' * 48}")
-        print(f"  {'Random prefix (no learning)':<35}  {rnd:>10.4f}")
-        print(f"  {'Linear probe':<35}  {linear_final:>10.4f}")
-        print(f"  {'MLP probe (2-layer)':<35}  {mlp_final:>10.4f}")
-        print(f"  {'Full pipeline (Perceiver)':<35}  {overfit_final:>10.4f}")
-        print(f"  {'─' * 48}")
+        print(f"\n  {'Method':<35}  {'Loss':>10}  {'Steps':>7}")
+        print(f"  {'─' * 56}")
+        print(f"  {'Random prefix (no learning)':<35}  {rnd:>10.4f}  {'--':>7}")
+        print(f"  {'Linear probe':<35}  {linear_final:>10.4f}  {args.probe_steps:>7}")
+        print(f"  {'MLP probe (2-layer)':<35}  {mlp_final:>10.4f}  {args.probe_steps:>7}")
+        print(f"  {'Full pipeline (Perceiver)':<35}  {overfit_final:>10.4f}  {args.steps:>7}")
+        print(f"  {'─' * 56}")
 
         all_beat_random = linear_final < rnd and mlp_final < rnd
         pipeline_beats_mlp = overfit_final < mlp_final

@@ -201,8 +201,13 @@ def prepare_ntp_batch(
     data_path: str,
     batch_size: int,
     device: torch.device,
+    min_doc_tokens: int = 0,
 ) -> Tuple[dict, AutoTokenizer]:
     """Load a single NTP batch and tokenizer for diagnostic use.
+
+    Args:
+        min_doc_tokens: Skip samples whose doc_input_ids is shorter than this.
+            Useful for bottleneck experiments that need long documents.
 
     Returns:
         (batch_on_device, tokenizer)
@@ -218,8 +223,28 @@ def prepare_ntp_batch(
         segment_len=config.training.ntp_segment_len,
     )
     collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
-    n = min(batch_size, len(ds))
-    subset = Subset(ds, list(range(n)))
+
+    if min_doc_tokens > 0:
+        # Select samples with long enough documents
+        long_indices = []
+        for i in range(len(ds)):
+            sample = ds[i]
+            doc_len = sample["doc_input_ids"].shape[0]
+            if doc_len >= min_doc_tokens:
+                long_indices.append(i)
+            if len(long_indices) >= batch_size:
+                break
+        if not long_indices:
+            print(f"  WARNING: no documents >= {min_doc_tokens} tokens, using first {batch_size}")
+            long_indices = list(range(min(batch_size, len(ds))))
+        else:
+            print(f"  Found {len(long_indices)} docs >= {min_doc_tokens} tokens (indices: {long_indices})")
+        n = len(long_indices)
+        subset = Subset(ds, long_indices)
+    else:
+        n = min(batch_size, len(ds))
+        subset = Subset(ds, list(range(n)))
+
     batch = next(
         iter(DataLoader(subset, batch_size=n, shuffle=False, collate_fn=collator))
     )
