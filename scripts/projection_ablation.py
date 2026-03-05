@@ -1,30 +1,49 @@
 #!/usr/bin/env python3
-"""Quick ablation: compare 5 projection layer configurations.
+"""Projection layer ablation on real data with GPU optimization.
 
-Runs in a single process, reuses tokenizer across configs.
-Each config gets fresh model weights + independent NTP/QA training.
+Compares 5 projection configurations using the ablation dataset.
+Leverages Accelerate for bf16 mixed precision and large batch sizes.
+
+Each config runs: NTP Stage 1 → QA Stage 2 → Eval on dev set.
 
 Usage:
-  python scripts/projection_ablation.py
-  python scripts/projection_ablation.py --ntp_steps 150 --qa_steps 1500
+  # On H100 (default settings optimized for 80GB VRAM)
+  python scripts/projection_ablation.py \
+      --ntp_data data/ablation/ntp_ablation.jsonl \
+      --qa_train data/ablation/qa_ablation_train.json \
+      --qa_dev   data/ablation/qa_ablation_dev.json
+
+  # Quick test (fewer steps)
+  python scripts/projection_ablation.py \
+      --ntp_data data/ablation/ntp_ablation.jsonl \
+      --qa_train data/ablation/qa_ablation_train.json \
+      --qa_dev   data/ablation/qa_ablation_dev.json \
+      --ntp_steps 500 --qa_steps 500
+
+  # Run subset of configs
+  python scripts/projection_ablation.py ... --configs A_mlp768,B_mlp1024
 """
 
 import argparse
+import copy
 import gc
 import json
 import logging
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 import torch
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader, Subset
 from transformers import AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from deep_compressor.config import (
     AblationConfig,
@@ -36,16 +55,10 @@ from deep_compressor.config import (
     QwenConfig,
     TrainingConfig,
 )
-from deep_compressor.data import NTPDataset, PaddingCollator
-from deep_compressor.eval import compute_exact_match, compute_f1
+from deep_compressor.data import NTPDataset, PaddingCollator, QADataset
+from deep_compressor.eval import evaluate_qa
 from deep_compressor.model import DeepCompressor
-from overfit_test import (
-    FINANCIAL_QA,
-    QADatasetWithEOS,
-    evaluate,
-    make_temp_data,
-    train_loop,
-)
+from deep_compressor.train import train_stage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,15 +114,18 @@ ABLATION_CONFIGS = [
 ]
 
 
-def build_config(acfg, ntp_steps):
-    """Build DeepCompressorConfig with specific projection settings."""
+def build_config(acfg, args, stage):
+    """Build DeepCompressorConfig for a given projection config and training stage."""
+    max_steps = args.ntp_steps if stage == 1 else args.qa_steps
+    warmup = max(10, max_steps // 20)
+
     return DeepCompressorConfig(
         qwen=QwenConfig(
-            model_name_or_path="models/Qwen3-0.6B",
+            model_name_or_path=args.model_path,
             hidden_size=1024,
             num_hidden_layers=28,
             vocab_size=151936,
-            max_doc_tokens=256,
+            max_doc_tokens=512,
             max_question_tokens=64,
             max_answer_tokens=64,
         ),
@@ -126,12 +142,12 @@ def build_config(acfg, ntp_steps):
             stage_c_self_layers=4,
             ff_mult=4,
             anchor_score_scale_init=1.0,
-            dropout=0.0,
+            dropout=0.1,
         ),
         projection=ProjectionConfig(
             down_hidden=acfg["down_hidden"],
             up_hidden=acfg["up_hidden"],
-            dropout=0.0,
+            dropout=0.1,
         ),
         loss=LossConfig(
             kl_temperature=2.0,
@@ -143,23 +159,23 @@ def build_config(acfg, ntp_steps):
             anchor_recon_weight=0.0,
         ),
         training=TrainingConfig(
-            stage=1,
-            learning_rate=1e-3,
-            batch_size=2,
-            gradient_accumulation_steps=1,
-            max_steps=ntp_steps,
-            warmup_steps=10,
-            weight_decay=0.0,
+            stage=stage,
+            learning_rate=args.lr,
+            batch_size=args.batch_size,
+            gradient_accumulation_steps=args.grad_accum,
+            max_steps=max_steps,
+            warmup_steps=warmup,
+            weight_decay=0.01,
             max_grad_norm=1.0,
             scheduler="cosine",
             seed=42,
-            log_every=50,
-            eval_every=9999,
-            save_every=9999,
-            output_dir="outputs/proj_ablation",
+            log_every=max(1, max_steps // 20),
+            eval_every=max(1, max_steps // 5),
+            save_every=999999,  # no checkpoints during ablation
+            output_dir=f"outputs/proj_ablation/{acfg['name']}",
             ntp_segment_len=64,
             gradient_checkpointing=True,
-            mixed_precision="no",
+            mixed_precision=args.mixed_precision,
         ),
         ablation=AblationConfig(
             down_proj_mode=acfg["down_proj_mode"],
@@ -168,79 +184,134 @@ def build_config(acfg, ntp_steps):
     )
 
 
-def run_one_config(acfg, tokenizer, device, ntp_path, ntp_steps, qa_steps, lr):
-    """Train and evaluate one projection configuration. Returns result dict."""
+def run_one_config(acfg, tokenizer, args):
+    """Train NTP → QA → Eval for one projection configuration."""
     name = acfg["name"]
-    logger.info(f"\n{'='*60}")
-    logger.info(f"  Config: {name} — {acfg['desc']}")
-    logger.info(f"{'='*60}")
+    logger.info(f"\n{'='*70}")
+    logger.info(f"  [{name}] {acfg['desc']}")
+    logger.info(f"{'='*70}")
 
-    # Deterministic init
     torch.manual_seed(42)
-    if device.type == "mps":
-        torch.mps.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
 
-    config = build_config(acfg, ntp_steps)
-    model = DeepCompressor(config)
-    model = model.to(device)
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    proj_params = 0
-    for mod_name in ("down_proj", "up_mlp"):
-        mod = getattr(model, mod_name, None)
-        if mod is not None:
-            proj_params += sum(p.numel() for p in mod.parameters())
-    logger.info(f"  Trainable: {trainable:,}  (projection: {proj_params:,})")
-
-    collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
     t0 = time.time()
+    collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
+    is_cuda = torch.cuda.is_available()
+    num_workers = 4 if is_cuda else 0
+    pin_memory = is_cuda
 
-    # ── NTP ──
-    ntp_ds = NTPDataset(ntp_path, tokenizer, max_doc_tokens=256, segment_len=64)
-    ntp_loader = DataLoader(ntp_ds, batch_size=2, shuffle=True,
-                            collate_fn=collator, num_workers=0)
-    ntp_losses, _ = train_loop(model, ntp_loader, config, device,
-                               max_steps=ntp_steps, stage_name="ntp", lr=lr)
+    # ── Stage 1: NTP ──
+    logger.info(f"  [{name}] Stage 1: NTP ({args.ntp_steps} steps)")
+    ntp_config = build_config(acfg, args, stage=1)
+    ntp_model = DeepCompressor(ntp_config)
+    if ntp_config.training.gradient_checkpointing:
+        ntp_model.qwen.gradient_checkpointing_enable()
 
-    # ── QA ──
-    qa_ds = QADatasetWithEOS(FINANCIAL_QA, tokenizer,
-                             max_doc_tokens=256, max_question_tokens=64,
-                             max_answer_tokens=64)
-    qa_loader = DataLoader(qa_ds, batch_size=2, shuffle=True,
-                           collate_fn=collator, num_workers=0)
-    qa_losses, _ = train_loop(model, qa_loader, config, device,
-                              max_steps=qa_steps, stage_name="qa", lr=lr)
+    trainable = sum(p.numel() for p in ntp_model.parameters() if p.requires_grad)
+    proj_params = sum(
+        p.numel()
+        for n in ("down_proj", "up_mlp")
+        for p in getattr(ntp_model, n).parameters()
+    )
+    logger.info(f"  [{name}] Trainable: {trainable:,}  (projection: {proj_params:,})")
 
-    # ── Evaluate ──
-    results = evaluate(model, FINANCIAL_QA, tokenizer, device)
+    ntp_ds = NTPDataset(args.ntp_data, tokenizer,
+                        max_doc_tokens=512, segment_len=64)
+    n_total = len(ntp_ds)
+    n_val = min(500, n_total // 10) if n_total > 10 else 0
+    ntp_train = Subset(ntp_ds, list(range(n_total - n_val)))
+    ntp_val = Subset(ntp_ds, list(range(n_total - n_val, n_total))) if n_val else None
+
+    ntp_loader = DataLoader(ntp_train, batch_size=args.batch_size, shuffle=True,
+                            collate_fn=collator, num_workers=num_workers,
+                            pin_memory=pin_memory)
+    ntp_eval_loader = None
+    if ntp_val:
+        ntp_eval_loader = DataLoader(ntp_val, batch_size=args.batch_size,
+                                     shuffle=False, collate_fn=collator,
+                                     num_workers=num_workers, pin_memory=pin_memory)
+
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ntp_accelerator = Accelerator(
+        gradient_accumulation_steps=args.grad_accum,
+        mixed_precision=args.mixed_precision,
+        kwargs_handlers=[ddp_kwargs],
+    )
+
+    ntp_model, ntp_metrics = train_stage(
+        ntp_config, ntp_model, ntp_loader, ntp_accelerator,
+        mode="ntp", eval_loader=ntp_eval_loader, tokenizer=tokenizer,
+    )
+
+    ntp_loss = ntp_metrics["loss"] if ntp_metrics else float("nan")
+    ntp_ppl = ntp_metrics["perplexity"] if ntp_metrics else float("nan")
+    t_ntp = time.time() - t0
+
+    # Extract trained weights for Stage 2
+    unwrapped_ntp = ntp_accelerator.unwrap_model(ntp_model)
+    trained_state = {k: v.cpu().clone() for k, v in unwrapped_ntp.state_dict().items()
+                     if not k.startswith("qwen.")}
+
+    # Cleanup Stage 1
+    del ntp_model, ntp_accelerator, ntp_loader, ntp_eval_loader
+    gc.collect()
+    if is_cuda:
+        torch.cuda.empty_cache()
+
+    # ── Stage 2: QA ──
+    logger.info(f"  [{name}] Stage 2: QA ({args.qa_steps} steps)")
+    qa_config = build_config(acfg, args, stage=2)
+    qa_model = DeepCompressor(qa_config)
+    if qa_config.training.gradient_checkpointing:
+        qa_model.qwen.gradient_checkpointing_enable()
+
+    # Load NTP-trained weights
+    qa_model.load_state_dict(trained_state, strict=False)
+    del trained_state
+
+    qa_ds = QADataset(args.qa_train, tokenizer,
+                      max_doc_tokens=512, max_question_tokens=64,
+                      max_answer_tokens=64)
+    qa_loader = DataLoader(qa_ds, batch_size=args.batch_size, shuffle=True,
+                           collate_fn=collator, num_workers=num_workers,
+                           pin_memory=pin_memory)
+
+    qa_eval_loader = None
+    if args.qa_dev:
+        qa_eval_ds = QADataset(args.qa_dev, tokenizer,
+                               max_doc_tokens=512, max_question_tokens=64,
+                               max_answer_tokens=64)
+        qa_eval_loader = DataLoader(qa_eval_ds, batch_size=args.batch_size,
+                                    shuffle=False, collate_fn=collator,
+                                    num_workers=num_workers, pin_memory=pin_memory)
+        logger.info(f"  [{name}] QA train: {len(qa_ds):,}  dev: {len(qa_eval_ds):,}")
+
+    ddp_kwargs2 = DistributedDataParallelKwargs(find_unused_parameters=True)
+    qa_accelerator = Accelerator(
+        gradient_accumulation_steps=args.grad_accum,
+        mixed_precision=args.mixed_precision,
+        kwargs_handlers=[ddp_kwargs2],
+    )
+
+    qa_model, qa_metrics = train_stage(
+        qa_config, qa_model, qa_loader, qa_accelerator,
+        mode="qa", eval_loader=qa_eval_loader, tokenizer=tokenizer,
+    )
+
     elapsed = time.time() - t0
 
-    total_em = sum(r["em"] for r in results) / len(results)
-    total_f1 = sum(r["f1"] for r in results) / len(results)
-    ntp_final = sum(ntp_losses[-10:]) / max(len(ntp_losses[-10:]), 1)
-    qa_final = sum(qa_losses[-10:]) / max(len(qa_losses[-10:]), 1)
+    # Extract final metrics
+    em = qa_metrics.get("exact_match", 0.0) if qa_metrics else 0.0
+    f1 = qa_metrics.get("f1", 0.0) if qa_metrics else 0.0
 
-    # Per-type breakdown
-    type_a = results[:3]   # simple numeric
-    type_b = results[3:8]  # sentence-level
-    type_c = results[8:]   # reasoning
+    logger.info(f"  [{name}] DONE  EM={em:.2%}  F1={f1:.4f}  "
+                f"NTP_ppl={ntp_ppl:.2f}  time={elapsed:.0f}s")
 
-    em_a = sum(r["em"] for r in type_a) / len(type_a)
-    em_b = sum(r["em"] for r in type_b) / len(type_b)
-    em_c = sum(r["em"] for r in type_c) / len(type_c)
-    f1_a = sum(r["f1"] for r in type_a) / len(type_a)
-    f1_b = sum(r["f1"] for r in type_b) / len(type_b)
-    f1_c = sum(r["f1"] for r in type_c) / len(type_c)
-
-    logger.info(f"  [{name}] EM={total_em:.0%} F1={total_f1:.2%} "
-                f"NTP={ntp_final:.3f} QA={qa_final:.3f} {elapsed:.0f}s")
-
-    # Cleanup
-    del model
+    # Cleanup Stage 2
+    del qa_model, qa_accelerator, qa_loader, qa_eval_loader
     gc.collect()
-    if device.type == "mps":
-        torch.mps.empty_cache()
-    elif device.type == "cuda":
+    if is_cuda:
         torch.cuda.empty_cache()
 
     return {
@@ -248,123 +319,142 @@ def run_one_config(acfg, tokenizer, device, ntp_path, ntp_steps, qa_steps, lr):
         "desc": acfg["desc"],
         "trainable_params": trainable,
         "proj_params": proj_params,
-        "ntp_final_loss": ntp_final,
-        "qa_final_loss": qa_final,
-        "em": total_em,
-        "f1": total_f1,
-        "em_a": em_a, "f1_a": f1_a,
-        "em_b": em_b, "f1_b": f1_b,
-        "em_c": em_c, "f1_c": f1_c,
+        "ntp_loss": ntp_loss,
+        "ntp_ppl": ntp_ppl,
+        "ntp_time": t_ntp,
+        "em": em,
+        "f1": f1,
         "elapsed": elapsed,
-        "per_sample": results,
     }
 
 
 def print_comparison(all_results):
-    """Print final comparison table."""
-    print("\n" + "=" * 90)
-    print("  PROJECTION ABLATION RESULTS")
-    print("=" * 90)
+    """Print final comparison table sorted by F1."""
+    print("\n" + "=" * 95)
+    print("  PROJECTION ABLATION RESULTS (Real Data)")
+    print("=" * 95)
 
-    # Sort by F1 descending
     ranked = sorted(all_results, key=lambda r: r["f1"], reverse=True)
 
-    print(f"\n  {'Config':<20} {'Proj Params':<12} {'QA Loss':<9} "
-          f"{'EM':<7} {'F1':<7} {'A(num)':<8} {'B(sent)':<8} {'C(reason)':<8} {'Time':<6}")
-    print("  " + "-" * 86)
-    for r in ranked:
+    print(f"\n  {'#':<3} {'Config':<20} {'Proj Params':<12} "
+          f"{'NTP PPL':<9} {'EM':<8} {'F1':<8} {'Time':<7}")
+    print("  " + "-" * 70)
+    for i, r in enumerate(ranked):
         proj_str = f"{r['proj_params']:,}" if r['proj_params'] > 0 else "0"
-        print(f"  {r['name']:<20} {proj_str:<12} {r['qa_final_loss']:<9.4f} "
-              f"{r['em']:.0%}{'':>3} {r['f1']:.2%}  "
-              f"{r['f1_a']:.2f}{'':>3} {r['f1_b']:.2f}{'':>3} {r['f1_c']:.2f}{'':>3} "
-              f"{r['elapsed']:.0f}s")
+        mark = " *" if i == 0 else ""
+        print(f"  {i+1:<3} {r['name']:<20} {proj_str:<12} "
+              f"{r['ntp_ppl']:<9.2f} {r['em']:.2%}{'':>2} {r['f1']:.4f}  "
+              f"{r['elapsed']:.0f}s{mark}")
 
     best = ranked[0]
-    print(f"\n  BEST: {best['name']} — {best['desc']}")
-    print(f"        EM={best['em']:.0%}  F1={best['f1']:.2%}")
+    worst = ranked[-1]
+    baseline = next((r for r in all_results if r["name"] == "A_mlp768"), ranked[-1])
 
-    # Per-sample detail for top 2
-    print(f"\n  Per-sample comparison (top 2 vs baseline):")
-    baseline = next(r for r in all_results if r["name"] == "A_mlp768")
-    top1 = ranked[0]
-    top2 = ranked[1] if len(ranked) > 1 else None
+    print(f"\n  BEST:     {best['name']} — {best['desc']}")
+    print(f"            EM={best['em']:.2%}  F1={best['f1']:.4f}")
+    if best["name"] != baseline["name"]:
+        delta_f1 = best["f1"] - baseline["f1"]
+        delta_em = best["em"] - baseline["em"]
+        print(f"            vs baseline: EM {delta_em:+.2%}  F1 {delta_f1:+.4f}")
 
-    print(f"\n  {'#':<3} {'Gold':<18} "
-          f"{'baseline':<20} {'#1 '+top1['name']:<20}", end="")
-    if top2 and top2["name"] != baseline["name"]:
-        print(f" {'#2 '+top2['name']:<20}", end="")
-    print()
-    print("  " + "-" * 80)
+    print(f"\n  WORST:    {worst['name']} — {worst['desc']}")
+    print(f"            EM={worst['em']:.2%}  F1={worst['f1']:.4f}")
 
-    for i in range(len(FINANCIAL_QA)):
-        gold = FINANCIAL_QA[i]["answer"][:16]
-        bp = baseline["per_sample"][i]
-        t1p = top1["per_sample"][i]
-        b_mark = "Y" if bp["em"] > 0 else " "
-        t1_mark = "Y" if t1p["em"] > 0 else " "
-        b_pred = bp["pred"][:16] if bp["pred"] else "(empty)"
-        t1_pred = t1p["pred"][:16] if t1p["pred"] else "(empty)"
-
-        line = f"  {i+1:<3} {gold:<18} {b_pred:<16}[{b_mark}] {t1_pred:<16}[{t1_mark}]"
-
-        if top2 and top2["name"] != baseline["name"]:
-            t2p = top2["per_sample"][i]
-            t2_mark = "Y" if t2p["em"] > 0 else " "
-            t2_pred = t2p["pred"][:16] if t2p["pred"] else "(empty)"
-            line += f" {t2_pred:<16}[{t2_mark}]"
-
-        print(line)
-
-    print("\n" + "=" * 90)
+    # JSON dump for further analysis
+    json_path = "outputs/proj_ablation/results.json"
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, "w") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\n  Results saved to {json_path}")
+    print("=" * 95)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Projection layer ablation")
-    parser.add_argument("--ntp_steps", type=int, default=100)
-    parser.add_argument("--qa_steps", type=int, default=1500)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser = argparse.ArgumentParser(
+        description="Projection layer ablation on real data")
+
+    # Data paths
+    parser.add_argument("--ntp_data", type=str,
+                        default="data/ablation/ntp_ablation.jsonl")
+    parser.add_argument("--qa_train", type=str,
+                        default="data/ablation/qa_ablation_train.json")
+    parser.add_argument("--qa_dev", type=str, default=None,
+                        help="QA dev set for evaluation (default: auto-detect)")
+    parser.add_argument("--model_path", type=str, default="models/Qwen3-0.6B")
+
+    # Training steps
+    parser.add_argument("--ntp_steps", type=int, default=2000,
+                        help="NTP pretraining steps per config")
+    parser.add_argument("--qa_steps", type=int, default=2000,
+                        help="QA fine-tuning steps per config")
+    parser.add_argument("--lr", type=float, default=5e-4)
+
+    # H100 optimization
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Micro-batch size per GPU (default: 32 for H100)")
+    parser.add_argument("--grad_accum", type=int, default=2,
+                        help="Gradient accumulation steps (eff_batch = batch_size * grad_accum)")
+    parser.add_argument("--mixed_precision", type=str, default="bf16",
+                        choices=["no", "fp16", "bf16"],
+                        help="Mixed precision mode (bf16 recommended for H100)")
+
+    # Config selection
     parser.add_argument("--configs", type=str, default=None,
-                        help="Comma-separated config names to run (default: all)")
+                        help="Comma-separated config names (default: all 5)")
+
     args = parser.parse_args()
 
-    device = torch.device(
-        "mps" if torch.backends.mps.is_available()
-        else "cuda" if torch.cuda.is_available()
-        else "cpu"
-    )
-    logger.info(f"Device: {device}")
-    logger.info(f"NTP steps: {args.ntp_steps}, QA steps: {args.qa_steps}")
+    # Auto-detect QA dev path
+    if args.qa_dev is None:
+        candidate = args.qa_train.replace("_train.", "_dev.")
+        if os.path.exists(candidate):
+            args.qa_dev = candidate
+            logger.info(f"Auto-detected QA dev: {args.qa_dev}")
+        else:
+            logger.warning("No QA dev set found — eval will be skipped")
 
-    tokenizer = AutoTokenizer.from_pretrained("models/Qwen3-0.6B")
+    # Validate data paths
+    for name, path in [("ntp_data", args.ntp_data), ("qa_train", args.qa_train)]:
+        if not os.path.exists(path):
+            logger.error(f"File not found: {path}")
+            logger.error("Run 'python scripts/prepare_data.py && "
+                         "python scripts/prepare_data.py --make-ablation' first")
+            sys.exit(1)
+
+    eff_batch = args.batch_size * args.grad_accum
+    logger.info(f"batch_size={args.batch_size} × grad_accum={args.grad_accum} "
+                f"= eff_batch {eff_batch}")
+    logger.info(f"mixed_precision={args.mixed_precision}")
+    logger.info(f"NTP steps={args.ntp_steps}, QA steps={args.qa_steps}")
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+        logger.info(f"GPU: {gpu_name} ({gpu_mem:.0f} GB)")
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Filter configs if requested
+    # Filter configs
     configs = ABLATION_CONFIGS
     if args.configs:
         names = set(args.configs.split(","))
         configs = [c for c in configs if c["name"] in names]
-        logger.info(f"Running {len(configs)} configs: {[c['name'] for c in configs]}")
+    logger.info(f"Running {len(configs)} configs: {[c['name'] for c in configs]}")
 
-    # Need DataLoader import
-    from torch.utils.data import DataLoader  # noqa: F811
+    all_results = []
+    for i, acfg in enumerate(configs):
+        logger.info(f"\n>>> Config {i+1}/{len(configs)}: {acfg['name']}")
+        result = run_one_config(acfg, tokenizer, args)
+        all_results.append(result)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ntp_path, _ = make_temp_data(tmpdir)
+        # Print running comparison after each config
+        if len(all_results) > 1:
+            print_comparison(all_results)
 
-        all_results = []
-        for i, acfg in enumerate(configs):
-            logger.info(f"\n>>> Running config {i+1}/{len(configs)}: {acfg['name']}")
-            result = run_one_config(
-                acfg, tokenizer, device, ntp_path,
-                args.ntp_steps, args.qa_steps, args.lr,
-            )
-            all_results.append(result)
-
+    # Final comparison
     print_comparison(all_results)
 
 
 if __name__ == "__main__":
-    # DataLoader needs to be importable at module level for run_one_config
-    from torch.utils.data import DataLoader  # noqa: F811
     main()
