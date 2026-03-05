@@ -7,25 +7,26 @@ Leverages Accelerate for bf16 mixed precision and large batch sizes.
 Each config runs: NTP Stage 1 → QA Stage 2 → Eval on dev set.
 
 Usage:
-  # On H100 (default settings optimized for 80GB VRAM)
+  # Default (300 steps per stage, ~5-6 min/config on H100)
   python scripts/projection_ablation.py \
       --ntp_data data/ablation/ntp_ablation.jsonl \
       --qa_train data/ablation/qa_ablation_train.json \
       --qa_dev   data/ablation/qa_ablation_dev.json
 
-  # Quick test (fewer steps)
-  python scripts/projection_ablation.py \
+  # Fast smoke test (~1-2 min/config)
+  python scripts/projection_ablation.py --fast \
       --ntp_data data/ablation/ntp_ablation.jsonl \
       --qa_train data/ablation/qa_ablation_train.json \
-      --qa_dev   data/ablation/qa_ablation_dev.json \
-      --ntp_steps 500 --qa_steps 500
+      --qa_dev   data/ablation/qa_ablation_dev.json
 
   # Run subset of configs
   python scripts/projection_ablation.py ... --configs A_mlp768,B_mlp1024
+
+Results are saved incrementally to outputs/proj_ablation/results.json.
+Running configs separately will merge into the same results file.
 """
 
 import argparse
-import copy
 import gc
 import json
 import logging
@@ -170,7 +171,7 @@ def build_config(acfg, args, stage):
             scheduler="cosine",
             seed=42,
             log_every=max(1, max_steps // 20),
-            eval_every=max(1, max_steps // 5),
+            eval_every=max(1, max_steps // 2),
             save_every=999999,  # no checkpoints during ablation
             output_dir=f"outputs/proj_ablation/{acfg['name']}",
             ntp_segment_len=64,
@@ -219,7 +220,7 @@ def run_one_config(acfg, tokenizer, args):
     ntp_ds = NTPDataset(args.ntp_data, tokenizer,
                         max_doc_tokens=512, segment_len=64)
     n_total = len(ntp_ds)
-    n_val = min(500, n_total // 10) if n_total > 10 else 0
+    n_val = min(100, n_total // 10) if n_total > 10 else 0
     ntp_train = Subset(ntp_ds, list(range(n_total - n_val)))
     ntp_val = Subset(ntp_ds, list(range(n_total - n_val, n_total))) if n_val else None
 
@@ -282,6 +283,8 @@ def run_one_config(acfg, tokenizer, args):
         qa_eval_ds = QADataset(args.qa_dev, tokenizer,
                                max_doc_tokens=512, max_question_tokens=64,
                                max_answer_tokens=64)
+        if args.max_eval_samples and len(qa_eval_ds) > args.max_eval_samples:
+            qa_eval_ds = Subset(qa_eval_ds, list(range(args.max_eval_samples)))
         qa_eval_loader = DataLoader(qa_eval_ds, batch_size=args.batch_size,
                                     shuffle=False, collate_fn=collator,
                                     num_workers=num_workers, pin_memory=pin_memory)
@@ -360,12 +363,23 @@ def print_comparison(all_results):
     print(f"\n  WORST:    {worst['name']} — {worst['desc']}")
     print(f"            EM={worst['em']:.2%}  F1={worst['f1']:.4f}")
 
-    # JSON dump for further analysis
+    # Incremental JSON save — merge with existing results by name
     json_path = "outputs/proj_ablation/results.json"
     os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    existing = []
+    if os.path.exists(json_path):
+        try:
+            with open(json_path) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            existing = []
+    # Merge: new results overwrite old ones with the same name
+    merged = {r["name"]: r for r in existing}
+    for r in all_results:
+        merged[r["name"]] = r
     with open(json_path, "w") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"\n  Results saved to {json_path}")
+        json.dump(list(merged.values()), f, indent=2, ensure_ascii=False)
+    print(f"\n  Results saved to {json_path} ({len(merged)} configs total)")
     print("=" * 95)
 
 
@@ -383,26 +397,41 @@ def main():
     parser.add_argument("--model_path", type=str, default="models/Qwen3-0.6B")
 
     # Training steps
-    parser.add_argument("--ntp_steps", type=int, default=2000,
-                        help="NTP pretraining steps per config")
-    parser.add_argument("--qa_steps", type=int, default=2000,
-                        help="QA fine-tuning steps per config")
+    parser.add_argument("--ntp_steps", type=int, default=300,
+                        help="NTP pretraining steps per config (default: 300)")
+    parser.add_argument("--qa_steps", type=int, default=300,
+                        help="QA fine-tuning steps per config (default: 300)")
     parser.add_argument("--lr", type=float, default=5e-4)
 
-    # H100 optimization
-    parser.add_argument("--batch_size", type=int, default=32,
-                        help="Micro-batch size per GPU (default: 32 for H100)")
-    parser.add_argument("--grad_accum", type=int, default=2,
+    # Batch / hardware
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Micro-batch size per GPU (default: 16)")
+    parser.add_argument("--grad_accum", type=int, default=1,
                         help="Gradient accumulation steps (eff_batch = batch_size * grad_accum)")
     parser.add_argument("--mixed_precision", type=str, default="bf16",
                         choices=["no", "fp16", "bf16"],
                         help="Mixed precision mode (bf16 recommended for H100)")
 
+    # Eval
+    parser.add_argument("--max_eval_samples", type=int, default=200,
+                        help="Max QA dev samples for evaluation (default: 200)")
+
     # Config selection
     parser.add_argument("--configs", type=str, default=None,
                         help="Comma-separated config names (default: all 5)")
 
+    # Fast mode
+    parser.add_argument("--fast", action="store_true",
+                        help="Smoke-test mode: 100 steps, 50 eval samples")
+
     args = parser.parse_args()
+
+    # --fast overrides
+    if args.fast:
+        args.ntp_steps = 100
+        args.qa_steps = 100
+        args.max_eval_samples = 50
+        logger.info("Fast mode: ntp_steps=100, qa_steps=100, max_eval_samples=50")
 
     # Auto-detect QA dev path
     if args.qa_dev is None:
