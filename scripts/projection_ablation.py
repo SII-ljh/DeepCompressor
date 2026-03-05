@@ -368,7 +368,8 @@ def run_one_config(acfg, model_size, model_path, tokenizer, args):
 
 def _result_key(r):
     """Unique key for a result entry (model + projection config)."""
-    return f"{r['model_size']}_{r['name']}"
+    model_size = r.get("model_size", "unknown")
+    return f"{model_size}_{r['name']}"
 
 
 def save_results(all_results, json_path):
