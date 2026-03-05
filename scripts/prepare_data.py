@@ -28,7 +28,7 @@ Usage:
   python scripts/prepare_data.py --test             # small subset
   python scripts/prepare_data.py --make-tiny        # ~50 samples for smoke tests
   python scripts/prepare_data.py --make-dev         # ~500-2000 for HP tuning
-  python scripts/prepare_data.py --make-ablation    # 15% of total for ablation experiments
+  python scripts/prepare_data.py --make-ablation    # 5% of total for ablation experiments
   python scripts/prepare_data.py --make-all-subsets # all subsets at once
   python scripts/prepare_data.py --skip-model       # skip model download
   python scripts/prepare_data.py --skip-data        # skip dataset download
@@ -646,8 +646,8 @@ def make_dev_subset(ntp_n: int = 2000, qa_dev_n: int = 500, seed: int = 42):
 
 
 # ── 6. Make ablation subset ────────────────────────────────────────────
-def make_ablation_subset(ratio: float = 0.15, seed: int = 123):
-    """Create fixed ablation subsets at a given ratio (default 15%) of total data.
+def make_ablation_subset(ratio: float = 0.05, seed: int = 123):
+    """Create fixed ablation subsets at a given ratio (default 5%) of total data.
 
     Uses a different seed from other subsets for independence.
     Writes to data/ablation/ directory.
@@ -661,7 +661,7 @@ def make_ablation_subset(ratio: float = 0.15, seed: int = 123):
 
     print(f"[Ablation] Target ratio: {ratio:.0%} of total data (seed={seed})")
 
-    # ── NTP: count total lines first, then reservoir sample 15% ──
+    # ── NTP: count total lines first, then reservoir sample ──
     ntp_src = DATA_DIR / "ntp_train.jsonl"
     print(f"[Ablation] Counting NTP lines in {ntp_src.name} ...")
     ntp_total = sum(1 for line in open(ntp_src, "r", encoding="utf-8") if line.strip())
@@ -673,7 +673,7 @@ def make_ablation_subset(ratio: float = 0.15, seed: int = 123):
     _write_jsonl(reservoir, ntp_out)
     print(f"  → {ntp_out.name}: {len(reservoir):,} lines")
 
-    # ── QA train: 15% stratified ──
+    # ── QA train: stratified sample ──
     qa_train_out = ablation_dir / "qa_ablation_train.json"
     with open(DATA_DIR / "qa_train.json", "r", encoding="utf-8") as f:
         qa_train_data = json.load(f)
@@ -683,7 +683,7 @@ def make_ablation_subset(ratio: float = 0.15, seed: int = 123):
     _write_json(sampled, qa_train_out)
     print(f"  → {qa_train_out.name}: {len(sampled):,} samples")
 
-    # ── QA dev: 15% stratified ──
+    # ── QA dev: stratified sample ──
     qa_dev_out = ablation_dir / "qa_ablation_dev.json"
     with open(DATA_DIR / "qa_dev.json", "r", encoding="utf-8") as f:
         qa_dev_data = json.load(f)
@@ -751,7 +751,7 @@ def main():
     parser.add_argument("--make-dev", action="store_true",
                         help="Extract ~500-2000 representative dev subsets for HP tuning")
     parser.add_argument("--make-ablation", action="store_true",
-                        help="Extract 15%% of total data as fixed-seed subsets for ablation experiments")
+                        help="Extract 5%% of total data as fixed-seed subsets for ablation experiments")
     parser.add_argument("--make-all-subsets", action="store_true",
                         help="Generate all subsets (tiny, dev, ablation) at once")
     parser.add_argument("--skip-model", action="store_true", help="Skip model download")

@@ -113,7 +113,7 @@ python scripts/prepare_data.py --make-tiny
 # 跳过模型下载（如已有本地 Qwen3-0.6B）
 python scripts/prepare_data.py --skip-model
 
-# 生成消融实验子集（总数据的 15%）
+# 生成消融实验子集（总数据的 5%）
 python scripts/prepare_data.py --make-ablation
 
 # 生成所有子集（tiny + dev + ablation）
@@ -158,7 +158,7 @@ python scripts/prepare_data.py --make-all-subsets
 | `data/qa_tiny_train.json` / `qa_tiny_dev.json` | 快速迭代 | 50 / 20 |
 | `data/ntp_dev.jsonl` | 开发集验证（按文档长度分层） | 2000 |
 | `data/qa_dev_hp.json` | 超参搜索验证（按来源分层） | 500 |
-| `data/ablation/` | 消融实验（总数据的 15%，按来源分层） | 自动计算 |
+| `data/ablation/` | 消融实验（总数据的 5%，按来源分层） | 自动计算 |
 
 ### 第三步：运行测试
 

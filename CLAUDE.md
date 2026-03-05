@@ -83,11 +83,11 @@ python -m deep_compressor.train \
 python scripts/prepare_data.py                    # full download (~1-2 hours)
 python scripts/prepare_data.py --test             # small test subset
 python scripts/prepare_data.py --make-tiny        # ~50 samples for pipeline smoke test
-python scripts/prepare_data.py --make-ablation    # 15% of total for ablation experiments
+python scripts/prepare_data.py --make-ablation    # 5% of total for ablation experiments
 python scripts/prepare_data.py --make-all-subsets # all subsets (tiny, dev, ablation)
 ```
 
-Downloads Qwen3-0.6B to `models/Qwen3-0.6B/` and builds NTP/QA datasets into `data/`. Key subsets: `ntp_tiny.jsonl` (50 samples), `qa_tiny_*.json` (50/20 samples), `ablation/` (15% of total data, stratified by source).
+Downloads Qwen3-0.6B to `models/Qwen3-0.6B/` and builds NTP/QA datasets into `data/`. Key subsets: `ntp_tiny.jsonl` (50 samples), `qa_tiny_*.json` (50/20 samples), `ablation/` (5% of total data, stratified by source).
 
 ## Running Experiments
 
