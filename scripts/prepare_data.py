@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Qwen3-0.6B model and prepare training datasets.
+"""Prepare training datasets for Deep Compressor.
 
 Default: download complete datasets for recommended training (~1.7B tokens).
 --test:       download small subsets for quick MacBook validation.
@@ -18,8 +18,7 @@ QA datasets (Stage 2):
   - TriviaQA RC      ~95K train / ~12K dev       (English)
   - DRCD             ~27K train / ~4K dev        (Traditional Chinese)
 
-Model:
-  - Qwen3-0.6B → ./models/Qwen3-0.6B/  (~3 GB float32)
+For model downloads, use scripts/download_models.py instead.
 
 Estimated download time (full mode): ~1-2 hours (C4 and CLUECorpus streaming).
 
@@ -30,8 +29,6 @@ Usage:
   python scripts/prepare_data.py --make-dev         # ~500-2000 for HP tuning
   python scripts/prepare_data.py --make-ablation    # 5% of total for ablation experiments
   python scripts/prepare_data.py --make-all-subsets # all subsets at once
-  python scripts/prepare_data.py --skip-model       # skip model download
-  python scripts/prepare_data.py --skip-data        # skip dataset download
 """
 
 import argparse
@@ -43,34 +40,10 @@ from pathlib import Path
 
 # ── paths ──────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MODEL_DIR = PROJECT_ROOT / "models" / "Qwen3-0.6B"
 DATA_DIR = PROJECT_ROOT / "data"
 
 
-# ── 1. Download model ──────────────────────────────────────────────────
-def download_model():
-    """Download Qwen3-0.6B tokenizer + model weights to local directory."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-    print("=" * 60)
-    print("[Model] Downloading Qwen3-0.6B tokenizer ...")
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    tokenizer.save_pretrained(str(MODEL_DIR))
-    print(f"  → tokenizer saved to {MODEL_DIR}")
-
-    print("[Model] Downloading Qwen3-0.6B (float32, ~3 GB) ...")
-    model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-0.6B", torch_dtype="float32",
-    )
-    model.save_pretrained(str(MODEL_DIR))
-    total_bytes = sum(f.stat().st_size for f in MODEL_DIR.rglob("*") if f.is_file())
-    print(f"  → model saved to {MODEL_DIR}  ({total_bytes / 1e9:.2f} GB)")
-    print()
-
-
-# ── 2. NTP data ───────────────────────────────────────────────────────
+# ── 1. NTP data ──────────────────────────────────────────────────────
 def prepare_ntp_data(test_mode: bool = False):
     """Build NTP pretraining data from multiple sources.
 
@@ -226,7 +199,7 @@ def prepare_ntp_data(test_mode: bool = False):
     print()
 
 
-# ── 3. QA data ────────────────────────────────────────────────────────
+# ── 2. QA data ────────────────────────────────────────────────────────
 def _convert_squad(dataset, max_n: int = 0, source: str = "squad"):
     """Convert SQuAD-format dataset to [{context, question, answer, source}]."""
     samples = []
@@ -529,7 +502,7 @@ def _print_file_info(path, label=None):
         print(f"  → {name}: {size / 1e3:.1f} KB")
 
 
-# ── 4. Make tiny subset from existing data ─────────────────────────────
+# ── 3. Make tiny subset from existing data ─────────────────────────────
 def make_tiny_subset(ntp_n: int = 50, qa_train_n: int = 50,
                      qa_dev_n: int = 20, seed: int = 42):
     """Extract tiny subsets (~50 samples) for pipeline smoke tests.
@@ -574,7 +547,7 @@ def make_tiny_subset(ntp_n: int = 50, qa_train_n: int = 50,
     print()
 
 
-# ── 5. Make dev subset ─────────────────────────────────────────────────
+# ── 4. Make dev subset ─────────────────────────────────────────────────
 def make_dev_subset(ntp_n: int = 2000, qa_dev_n: int = 500, seed: int = 42):
     """Create representative dev subsets for HP tuning evaluation.
 
@@ -645,7 +618,7 @@ def make_dev_subset(ntp_n: int = 2000, qa_dev_n: int = 500, seed: int = 42):
     print()
 
 
-# ── 6. Make ablation subset ────────────────────────────────────────────
+# ── 5. Make ablation subset ────────────────────────────────────────────
 def make_ablation_subset(ratio: float = 0.05, seed: int = 123):
     """Create fixed ablation subsets at a given ratio (default 5%) of total data.
 
@@ -695,7 +668,7 @@ def make_ablation_subset(ratio: float = 0.05, seed: int = 123):
     print()
 
 
-# ── 7. Make all subsets at once ────────────────────────────────────────
+# ── 6. Make all subsets at once ────────────────────────────────────────
 def make_all_subsets():
     """Generate all subsets (tiny, dev, ablation) in one go."""
     print("=" * 60)
@@ -734,16 +707,13 @@ def print_summary():
                     print(f"  {name:30s}  {size/1e6:.1f} MB")
                 else:
                     print(f"  {name:30s}  {size/1e3:.1f} KB")
-    if MODEL_DIR.exists():
-        total = sum(f.stat().st_size for f in MODEL_DIR.rglob("*") if f.is_file())
-        print(f"  {'models/Qwen3-0.6B/':30s}  {total/1e9:.2f} GB")
     print("-" * 60)
     print()
 
 
 # ── main ───────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Download model and prepare datasets")
+    parser = argparse.ArgumentParser(description="Prepare training datasets")
     parser.add_argument("--test", action="store_true",
                         help="Test mode: small subsets only")
     parser.add_argument("--make-tiny", action="store_true",
@@ -754,8 +724,6 @@ def main():
                         help="Extract 5%% of total data as fixed-seed subsets for ablation experiments")
     parser.add_argument("--make-all-subsets", action="store_true",
                         help="Generate all subsets (tiny, dev, ablation) at once")
-    parser.add_argument("--skip-model", action="store_true", help="Skip model download")
-    parser.add_argument("--skip-data", action="store_true", help="Skip data preparation")
     args = parser.parse_args()
 
     # ── subset generation modes (extract from existing data and exit) ──
@@ -785,16 +753,8 @@ def main():
     print("=" * 60)
     print()
 
-    if not args.skip_model:
-        download_model()
-    else:
-        print("[Model] Skipped (--skip-model)")
-
-    if not args.skip_data:
-        prepare_ntp_data(test_mode=args.test)
-        prepare_qa_data(test_mode=args.test)
-    else:
-        print("[Data] Skipped (--skip-data)")
+    prepare_ntp_data(test_mode=args.test)
+    prepare_qa_data(test_mode=args.test)
 
     print_summary()
 

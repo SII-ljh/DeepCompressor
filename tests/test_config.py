@@ -27,8 +27,10 @@ def test_tiny_config(tiny_config):
 
 
 def test_dim_consistency_check():
+    """Non-registry model: num_heads * head_dim must equal perceiver_dim."""
     with pytest.raises(ValueError, match="must equal perceiver_dim"):
         DeepCompressorConfig(
+            qwen=QwenConfig(model_name_or_path="tiny", hidden_size=64, num_hidden_layers=4),
             perceiver=PerceiverConfig(perceiver_dim=512, num_heads=8, head_dim=32),
         )
 
@@ -36,7 +38,8 @@ def test_dim_consistency_check():
 def test_hidden_layer_validation():
     with pytest.raises(ValueError, match="hidden_distill_layer"):
         DeepCompressorConfig(
-            qwen=QwenConfig(num_hidden_layers=4),
+            qwen=QwenConfig(model_name_or_path="tiny", hidden_size=64, num_hidden_layers=4),
+            perceiver=PerceiverConfig(perceiver_dim=64, num_heads=4, head_dim=16),
             loss=LossConfig(hidden_distill_layers=[5]),
         )
 
@@ -51,15 +54,47 @@ def test_nested_configs():
     assert isinstance(cfg.training, TrainingConfig)
 
 
+def test_qwen3_registry_auto_sync():
+    """Registry models auto-resolve hidden_size and sync perceiver_dim."""
+    # Qwen3-4B: hidden_size=2560, num_hidden_layers=36
+    cfg = DeepCompressorConfig(
+        qwen=QwenConfig(model_name_or_path="Qwen/Qwen3-4B"),
+        perceiver=PerceiverConfig(num_heads=16),
+    )
+    assert cfg.qwen.hidden_size == 2560
+    assert cfg.qwen.num_hidden_layers == 36
+    assert cfg.perceiver.perceiver_dim == 2560
+    assert cfg.perceiver.head_dim == 160  # 2560 / 16
+
+    # Local path should also match
+    cfg2 = DeepCompressorConfig(
+        qwen=QwenConfig(model_name_or_path="models/Qwen3-8B"),
+        perceiver=PerceiverConfig(num_heads=16),
+    )
+    assert cfg2.qwen.hidden_size == 4096
+    assert cfg2.perceiver.perceiver_dim == 4096
+    assert cfg2.perceiver.head_dim == 256  # 4096 / 16
+
+
+def test_qwen3_registry_bad_num_heads():
+    """Registry model with indivisible num_heads should raise."""
+    with pytest.raises(ValueError, match="must be divisible"):
+        DeepCompressorConfig(
+            qwen=QwenConfig(model_name_or_path="Qwen/Qwen3-4B"),
+            perceiver=PerceiverConfig(num_heads=7),  # 2560 % 7 != 0
+        )
+
+
 def test_from_yaml(tmp_path):
     yaml_content = """
 qwen:
+  model_name_or_path: "tiny"
   hidden_size: 128
   num_hidden_layers: 4
 perceiver:
-  perceiver_dim: 64
+  perceiver_dim: 128
   num_heads: 8
-  head_dim: 8
+  head_dim: 16
 loss:
   hidden_distill_layers: [1, 3]
 """
@@ -67,4 +102,4 @@ loss:
     yaml_file.write_text(yaml_content)
     cfg = DeepCompressorConfig.from_yaml(str(yaml_file))
     assert cfg.qwen.hidden_size == 128
-    assert cfg.perceiver.perceiver_dim == 64
+    assert cfg.perceiver.perceiver_dim == 128

@@ -3,7 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List, Optional
+
+# Qwen3 instruction-tuned model registry: model_name -> specs
+# Used for auto-resolving hidden_size / num_hidden_layers / vocab_size
+QWEN3_REGISTRY: Dict[str, Dict] = {
+    "Qwen/Qwen3-0.6B": {"hidden_size": 1024, "num_hidden_layers": 28, "vocab_size": 151936},
+    "Qwen/Qwen3-1.7B": {"hidden_size": 2048, "num_hidden_layers": 28, "vocab_size": 151936},
+    "Qwen/Qwen3-4B":   {"hidden_size": 2560, "num_hidden_layers": 36, "vocab_size": 151936},
+    "Qwen/Qwen3-8B":   {"hidden_size": 4096, "num_hidden_layers": 36, "vocab_size": 151936},
+}
+
+
+def _resolve_qwen3_specs(model_name_or_path: str) -> Optional[Dict]:
+    """Look up Qwen3 model specs from model name or local path.
+
+    Matches both HuggingFace names (e.g. "Qwen/Qwen3-4B") and
+    local paths containing the model ID (e.g. "models/Qwen3-4B").
+    """
+    for key, specs in QWEN3_REGISTRY.items():
+        model_id = key.split("/")[-1]  # e.g. "Qwen3-4B"
+        if key == model_name_or_path or model_id in model_name_or_path:
+            return specs
+    return None
 
 
 @dataclass
@@ -124,6 +146,28 @@ class DeepCompressorConfig:
     ablation: AblationConfig = field(default_factory=AblationConfig)
 
     def __post_init__(self) -> None:
+        # Auto-resolve Qwen3 model specs from registry
+        specs = _resolve_qwen3_specs(self.qwen.model_name_or_path)
+        if specs is not None:
+            self.qwen.hidden_size = specs["hidden_size"]
+            self.qwen.num_hidden_layers = specs["num_hidden_layers"]
+            self.qwen.vocab_size = specs["vocab_size"]
+
+            # Force perceiver_dim = qwen hidden_size (sequence-length-only compression)
+            self.perceiver.perceiver_dim = self.qwen.hidden_size
+
+            # Auto-compute head_dim from perceiver_dim and num_heads
+            if self.perceiver.perceiver_dim % self.perceiver.num_heads != 0:
+                raise ValueError(
+                    f"perceiver_dim ({self.perceiver.perceiver_dim}) must be divisible by "
+                    f"num_heads ({self.perceiver.num_heads}). "
+                    f"For {self.qwen.model_name_or_path} (hidden_size={self.qwen.hidden_size}), "
+                    f"try num_heads in: "
+                    f"{[h for h in [4, 8, 10, 16, 20, 32] if self.perceiver.perceiver_dim % h == 0]}"
+                )
+            self.perceiver.head_dim = self.perceiver.perceiver_dim // self.perceiver.num_heads
+
+        # Validate num_heads * head_dim == perceiver_dim
         if self.perceiver.num_heads * self.perceiver.head_dim != self.perceiver.perceiver_dim:
             raise ValueError(
                 f"num_heads ({self.perceiver.num_heads}) * head_dim ({self.perceiver.head_dim}) "
