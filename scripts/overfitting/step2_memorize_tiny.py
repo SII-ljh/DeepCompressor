@@ -410,7 +410,7 @@ def main():
 
     # Enable gradient checkpointing to reduce decoder activation memory
     if config.training.gradient_checkpointing:
-        model.qwen.gradient_checkpointing_enable()
+        model.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         logger.info("Gradient checkpointing enabled for Qwen")
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

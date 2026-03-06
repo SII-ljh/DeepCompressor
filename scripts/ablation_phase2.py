@@ -269,7 +269,7 @@ def _run_single_experiment(
 
     model = DeepCompressor(ntp_cfg)
     if ntp_cfg.training.gradient_checkpointing:
-        model.qwen.gradient_checkpointing_enable()
+        model.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
     num_workers = 0 if accelerator.device.type == "mps" else 2
@@ -352,7 +352,7 @@ def _run_single_experiment(
     # Rebuild model and load NTP weights
     model2 = DeepCompressor(qa_cfg)
     if qa_cfg.training.gradient_checkpointing:
-        model2.qwen.gradient_checkpointing_enable()
+        model2.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     ckpt_file = os.path.join(ntp_ckpt_path, "trainable_weights.pt")
     if os.path.exists(ckpt_file):

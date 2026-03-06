@@ -378,7 +378,7 @@ def _run_training(config: DeepCompressorConfig,
     model = DeepCompressor(config)
 
     if tcfg.gradient_checkpointing:
-        model.qwen.gradient_checkpointing_enable()
+        model.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         logger.info("Gradient checkpointing enabled for Qwen")
 
     if resume_from:

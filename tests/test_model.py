@@ -8,19 +8,39 @@ from deep_compressor.model import DeepCompressor
 
 
 class _MockQwenOutput:
-    def __init__(self, hidden_states, logits=None, loss=None):
+    def __init__(self, hidden_states=None, last_hidden_state=None, logits=None, loss=None):
         self.hidden_states = hidden_states
+        self.last_hidden_state = last_hidden_state
         self.logits = logits
         self.loss = loss
 
 
+class _MockQwenBaseModel(nn.Module):
+    """Mock base model (self.qwen.model) — returns hidden states without LM head."""
+
+    def __init__(self, embed_tokens, hidden_size, num_layers):
+        super().__init__()
+        self.embed_tokens = embed_tokens
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
+
+    def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None,
+                output_hidden_states=False, use_cache=False, **kwargs):
+        if inputs_embeds is not None:
+            h = inputs_embeds
+        else:
+            h = self.embed_tokens(input_ids)
+        all_hidden = [h] * (self._num_layers + 1) if output_hidden_states else None
+        return _MockQwenOutput(hidden_states=all_hidden, last_hidden_state=h)
+
+
 class _MockQwenModel(nn.Module):
-    """Minimal mock that behaves like Qwen for testing."""
+    """Minimal mock that behaves like Qwen2ForCausalLM for testing."""
 
     def __init__(self, hidden_size: int, vocab_size: int, num_layers: int):
         super().__init__()
-        self.model = nn.Module()
-        self.model.embed_tokens = nn.Embedding(vocab_size, hidden_size)
+        embed_tokens = nn.Embedding(vocab_size, hidden_size)
+        self.model = _MockQwenBaseModel(embed_tokens, hidden_size, num_layers)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
         self._hidden_size = hidden_size
         self._num_layers = num_layers
@@ -28,13 +48,10 @@ class _MockQwenModel(nn.Module):
     def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None,
                 labels=None, output_hidden_states=False, use_cache=False, **kwargs):
         if inputs_embeds is not None:
-            B, S, D = inputs_embeds.shape
             h = inputs_embeds
         else:
-            B, S = input_ids.shape
             h = self.model.embed_tokens(input_ids)
 
-        # Fake hidden states: just repeat the same tensor
         all_hidden = [h] * (self._num_layers + 1) if output_hidden_states else None
         logits = self.lm_head(h)
 
@@ -48,7 +65,8 @@ class _MockQwenModel(nn.Module):
                 ignore_index=-100,
             )
 
-        return _MockQwenOutput(hidden_states=all_hidden, logits=logits, loss=loss)
+        return _MockQwenOutput(hidden_states=all_hidden, last_hidden_state=h,
+                               logits=logits, loss=loss)
 
 
 def _make_model(config: DeepCompressorConfig) -> DeepCompressor:

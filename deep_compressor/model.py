@@ -107,11 +107,11 @@ class DeepCompressor(nn.Module):
             byte_array: (batch, doc_len, perceiver_dim)
         """
         with torch.no_grad():
-            outputs = self.qwen(
+            outputs = self.qwen.model(
                 input_ids=doc_input_ids, attention_mask=doc_attention_mask,
                 output_hidden_states=True, use_cache=False,
             )
-            hidden = outputs.hidden_states[-1].detach()  # (B, doc_len, qwen_dim)
+            hidden = outputs.last_hidden_state.detach()  # (B, doc_len, qwen_dim)
         # DownProj is trainable — must run outside no_grad
         return self.down_proj(hidden)
 
@@ -126,11 +126,11 @@ class DeepCompressor(nn.Module):
             queries: (batch, num_queries, perceiver_dim)
         """
         with torch.no_grad():
-            outputs = self.qwen(
+            outputs = self.qwen.model(
                 input_ids=q_input_ids, attention_mask=q_attention_mask,
                 output_hidden_states=True, use_cache=False,
             )
-            hidden = outputs.hidden_states[-1]  # (B, q_len, qwen_dim)
+            hidden = outputs.last_hidden_state  # (B, q_len, qwen_dim)
             mask_expanded = q_attention_mask.unsqueeze(-1).float()
             pooled = (hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
             pooled = pooled.detach()  # (B, qwen_dim)
