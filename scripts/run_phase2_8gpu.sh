@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 2 ablation: 13 experiments across 8x H200 GPUs
+# Phase 2 ablation: 15 experiments across 8x H200 GPUs
 #
 # Usage:
 #   bash scripts/run_phase2_8gpu.sh              # full run
@@ -47,19 +47,17 @@ mkdir -p "$LOGDIR"
 
 COMMON="--data_path $NTP_DATA --qa_data_path $QA_TRAIN --eval_data_path $QA_DEV --mixed_precision bf16 --batch_size 16 $FAST"
 
-# ── GPU assignment (balanced by compute cost) ──
-#   GPU 0-4: 2 experiments each (standard, ~30K steps)
-#   GPU 5:   deep (slower per step, more layers)
-#   GPU 6:   full_distillation (loads teacher model)
-#   GPU 7:   long_ntp (20K NTP steps)
+# ── GPU assignment (15 experiments, balanced by compute cost) ──
+#   GPU 0-6: 2 experiments each (standard, ~30K steps)
+#   GPU 7:   long_ntp (20K NTP steps, solo)
 declare -A GPU_CONFIGS
 GPU_CONFIGS[0]="baseline,no_stage_a"
 GPU_CONFIGS[1]="proj_identity,no_stage_b"
-GPU_CONFIGS[2]="queries_16,proj_linear"
-GPU_CONFIGS[3]="queries_32,no_stage_ac"
-GPU_CONFIGS[4]="no_distillation,lr_1e-3"
-GPU_CONFIGS[5]="deep"
-GPU_CONFIGS[6]="full_distillation"
+GPU_CONFIGS[2]="queries_16,no_query_cond"
+GPU_CONFIGS[3]="no_stage_c,proj_linear"
+GPU_CONFIGS[4]="queries_32,no_stage_ac"
+GPU_CONFIGS[5]="deep,no_distillation"
+GPU_CONFIGS[6]="full_distillation,lr_1e-3"
 GPU_CONFIGS[7]="long_ntp"
 
 # ── Launch 8 processes ──
@@ -114,11 +112,11 @@ for f in sorted(glob.glob('${OUTDIR}_gpu*/phase2_results.json')):
 out = '${OUTDIR}/phase2_results.json'
 import os; os.makedirs('${OUTDIR}', exist_ok=True)
 json.dump(merged, open(out, 'w'), indent=2)
-print(f'Merged {len(merged)}/13 experiments -> {out}')
+print(f'Merged {len(merged)}/15 experiments -> {out}')
 
 # Summary table
 ok = sum(1 for r in merged.values() if r.get('status') == 'OK')
-print(f'\nStatus: {ok} OK, {len(merged)-ok} other, {13-len(merged)} missing')
+print(f'\nStatus: {ok} OK, {len(merged)-ok} other, {15-len(merged)} missing')
 for name, r in sorted(merged.items()):
     s = r.get('status', '?')
     ntp_ppl = r.get('ntp_metrics', {}).get('perplexity')
@@ -135,4 +133,4 @@ if [[ "$FAILED" -gt 0 ]]; then
 fi
 
 echo ""
-echo "[INFO] All 13 experiments complete."
+echo "[INFO] All 15 experiments complete."

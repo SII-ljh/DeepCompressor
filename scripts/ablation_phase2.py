@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Phase 2 mid-scale ablation study: 13 experiments at 5x Phase 1 scale.
+"""Phase 2 mid-scale ablation study: 15 experiments at 5x Phase 1 scale.
 
 Runs 10K NTP + 5K QA steps per experiment (vs 2K+1K in Phase 1) to verify
 trends and get real QA metrics now that the generate_answer() bug is fixed.
 
-13 experiments in 4 groups:
-  A: Phase 1 validation (baseline, proj_identity, no_stage_b, no_stage_a, queries_16)
+15 experiments in 4 groups:
+  A: Core module ablations (baseline, proj_identity, no_stage_b, no_stage_a,
+     queries_16, no_query_cond, no_stage_c)
   B: New architecture variants (proj_linear, queries_32, deep, no_stage_ac)
   C: Distillation (no_distillation, full_distillation)
   D: Training schedule (lr_1e-3, long_ntp)
@@ -91,6 +92,12 @@ EXPERIMENTS: List[ExperimentSpec] = [
                    training_overrides={}, loss_overrides={}),
     ExperimentSpec("queries_16", "A", "16 queries (aggressive compression)",
                    ablation_overrides={"override_num_queries": 16},
+                   training_overrides={}, loss_overrides={}),
+    ExperimentSpec("no_query_cond", "A", "QueryInit without question conditioning",
+                   ablation_overrides={"query_condition_on_question": False},
+                   training_overrides={}, loss_overrides={}),
+    ExperimentSpec("no_stage_c", "A", "Disable Stage C (deep reasoning)",
+                   ablation_overrides={"enable_stage_c": False},
                    training_overrides={}, loss_overrides={}),
 
     # ── Group B: New architecture variants ──
@@ -417,14 +424,14 @@ def _run_single_experiment(
 
 def _list_experiments():
     """Print all experiments grouped."""
-    print("\nPhase 2 Ablation Experiments (13 total):")
+    print(f"\nPhase 2 Ablation Experiments ({len(EXPERIMENTS)} total):")
     print(f"  {'#':<3} {'Group':<6} {'Name':<20} {'Description'}")
     print(f"  {'─' * 70}")
     for i, exp in enumerate(EXPERIMENTS, 1):
         print(f"  {i:<3} {exp.group:<6} {exp.name:<20} {exp.description}")
 
     print(f"\nGroups: {', '.join(GROUPS)}")
-    print("  A: Phase 1 validation (5 experiments)")
+    print("  A: Core module ablations (7 experiments)")
     print("  B: New architecture variants (4 experiments)")
     print("  C: Distillation (2 experiments)")
     print("  D: Training schedule (2 experiments)")
@@ -506,7 +513,7 @@ def _print_results(results: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Phase 2 mid-scale ablation study (13 experiments)")
+        description="Phase 2 mid-scale ablation study (15 experiments)")
     parser.add_argument("--list", action="store_true",
                         help="List all experiments and exit")
     parser.add_argument("--config", type=str, default="configs/ablation_base.yaml",
