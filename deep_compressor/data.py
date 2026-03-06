@@ -78,14 +78,13 @@ class NTPDataset(Dataset):
         doc_ids = input_ids[:split_point]
         seg_ids = input_ids[split_point:]
 
-        # For NTP: segment input is seg[:-1], labels is seg[1:]
-        seg_input = seg_ids[:-1] if len(seg_ids) > 1 else seg_ids
-        seg_labels = seg_ids[1:] if len(seg_ids) > 1 else seg_ids
-
+        # Pass raw segment tokens as both input and labels.
+        # HuggingFace ForCausalLMLoss handles the causal shift internally
+        # (logits[i] predicts labels[i+1]).
         return {
             "doc_input_ids": doc_ids,
-            "segment_ids": seg_input,
-            "segment_labels": seg_labels,
+            "segment_ids": seg_ids,
+            "segment_labels": seg_ids.clone(),
         }
 
 
