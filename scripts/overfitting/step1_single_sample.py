@@ -385,6 +385,11 @@ def main():
 
     model = model.to(device)
 
+    # Enable gradient checkpointing to reduce decoder activation memory
+    if config.training.gradient_checkpointing:
+        model.qwen.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled for Qwen")
+
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     logger.info(f"Parameters: {trainable:,} trainable / {total:,} total "

@@ -223,11 +223,12 @@ def train(model, train_loader, val_loader, config, device, args, use_bf16=False)
 
                 if step % tcfg.log_every == 0:
                     avg = running_loss / micro_steps
+                    ppl = math.exp(min(avg, 20))
                     lr = scheduler.get_last_lr()[0]
                     elapsed = time.time() - t0
                     logger.info(
                         f"step {step}/{tcfg.max_steps}  "
-                        f"loss={avg:.4f}  lr={lr:.2e}  "
+                        f"loss={avg:.4f}  ppl={ppl:.1f}  lr={lr:.2e}  "
                         f"elapsed={elapsed:.0f}s  epoch={epoch}"
                     )
                     running_loss = 0.0
@@ -429,6 +430,11 @@ def main():
         logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
     model = model.to(device)
+
+    # Enable gradient checkpointing to reduce decoder activation memory
+    if config.training.gradient_checkpointing:
+        model.qwen.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled for Qwen")
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
