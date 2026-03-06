@@ -14,14 +14,20 @@ The script:
   5. Saves a learning curve CSV for plotting
 
 Usage:
-  # Default: 20K steps on ablation subset
+  # Default: 20K steps on ablation subset (auto bf16 on CUDA)
   python scripts/overfit_test.py
+
+  # H200 full utilization: large batch, long docs, bf16
+  python scripts/overfit_test.py --batch_size 64 --max_doc_tokens 4096 --steps 20000
 
   # Custom steps / LR / eval frequency
   python scripts/overfit_test.py --steps 50000 --lr 5e-4 --eval_every 1000
 
   # Use tiny data for quick smoke test
   python scripts/overfit_test.py --data_path data/ntp_tiny.jsonl --steps 2000
+
+  # Disable bf16 if needed
+  python scripts/overfit_test.py --no_bf16
 
   # Resume from checkpoint
   python scripts/overfit_test.py --checkpoint outputs/overfit_ntp/trainable_weights.pt
@@ -37,6 +43,7 @@ import time
 from pathlib import Path
 
 import torch
+from torch.amp import autocast
 from torch.utils.data import DataLoader, Subset
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -126,7 +133,7 @@ def build_config(args) -> DeepCompressorConfig:
 # ── Evaluation (no accelerator) ──────────────────────────────────────
 
 @torch.no_grad()
-def evaluate_ntp_simple(model, eval_loader, device):
+def evaluate_ntp_simple(model, eval_loader, device, use_bf16=False):
     """Compute average NTP loss and perplexity without accelerator."""
     model.eval()
     total_loss = 0.0
@@ -135,16 +142,17 @@ def evaluate_ntp_simple(model, eval_loader, device):
     for batch in eval_loader:
         batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-        losses = model(
-            mode="ntp",
-            doc_input_ids=batch_dev["doc_input_ids"],
-            doc_attention_mask=batch_dev["doc_attention_mask"],
-            segment_ids=batch_dev["segment_ids"],
-            segment_attention_mask=batch_dev["segment_attention_mask"],
-            segment_labels=batch_dev["segment_labels"],
-        )
+        with autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            losses = model(
+                mode="ntp",
+                doc_input_ids=batch_dev["doc_input_ids"],
+                doc_attention_mask=batch_dev["doc_attention_mask"],
+                segment_ids=batch_dev["segment_ids"],
+                segment_attention_mask=batch_dev["segment_attention_mask"],
+                segment_labels=batch_dev["segment_labels"],
+            )
         bs = batch_dev["doc_input_ids"].shape[0]
-        total_loss += losses["total"].item() * bs
+        total_loss += losses["total"].float().item() * bs
         total_samples += bs
 
     avg_loss = total_loss / max(total_samples, 1)
@@ -155,7 +163,7 @@ def evaluate_ntp_simple(model, eval_loader, device):
 
 # ── Training loop ────────────────────────────────────────────────────
 
-def train(model, train_loader, val_loader, config, device, args):
+def train(model, train_loader, val_loader, config, device, args, use_bf16=False):
     """NTP training loop with periodic val PPL evaluation."""
     tcfg = config.training
 
@@ -191,9 +199,12 @@ def train(model, train_loader, val_loader, config, device, args):
     best_ppl = float("inf")
     t0 = time.time()
 
+    if use_bf16:
+        logger.info("Using bf16 mixed precision (autocast)")
+
     # Initial eval
     if val_loader is not None:
-        metrics = evaluate_ntp_simple(model, val_loader, device)
+        metrics = evaluate_ntp_simple(model, val_loader, device, use_bf16=use_bf16)
         logger.info(f"[init] val_loss={metrics['loss']:.4f}  val_ppl={metrics['perplexity']:.1f}")
         csv_writer.writerow([0, "", f"{metrics['loss']:.4f}",
                              f"{metrics['perplexity']:.1f}", f"{tcfg.learning_rate:.2e}", "0"])
@@ -207,18 +218,19 @@ def train(model, train_loader, val_loader, config, device, args):
             batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
 
-            losses = model(
-                mode="ntp",
-                doc_input_ids=batch_dev["doc_input_ids"],
-                doc_attention_mask=batch_dev["doc_attention_mask"],
-                segment_ids=batch_dev["segment_ids"],
-                segment_attention_mask=batch_dev["segment_attention_mask"],
-                segment_labels=batch_dev["segment_labels"],
-            )
+            with autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                losses = model(
+                    mode="ntp",
+                    doc_input_ids=batch_dev["doc_input_ids"],
+                    doc_attention_mask=batch_dev["doc_attention_mask"],
+                    segment_ids=batch_dev["segment_ids"],
+                    segment_attention_mask=batch_dev["segment_attention_mask"],
+                    segment_labels=batch_dev["segment_labels"],
+                )
 
             loss = losses["total"] / tcfg.gradient_accumulation_steps
             loss.backward()
-            running_loss += losses["total"].item()
+            running_loss += losses["total"].float().item()
             micro_steps += 1
 
             if micro_steps % tcfg.gradient_accumulation_steps == 0:
@@ -245,7 +257,7 @@ def train(model, train_loader, val_loader, config, device, args):
 
                 # Val eval
                 if val_loader is not None and step % tcfg.eval_every == 0:
-                    metrics = evaluate_ntp_simple(model, val_loader, device)
+                    metrics = evaluate_ntp_simple(model, val_loader, device, use_bf16=use_bf16)
                     elapsed = time.time() - t0
                     lr = scheduler.get_last_lr()[0]
 
@@ -279,7 +291,7 @@ def train(model, train_loader, val_loader, config, device, args):
 
     # Final eval
     if val_loader is not None:
-        metrics = evaluate_ntp_simple(model, val_loader, device)
+        metrics = evaluate_ntp_simple(model, val_loader, device, use_bf16=use_bf16)
         elapsed = time.time() - t0
         if metrics["perplexity"] < best_ppl:
             best_ppl = metrics["perplexity"]
@@ -351,6 +363,12 @@ def main():
     parser.add_argument("--save_every", type=int, default=5000,
                         help="Save checkpoint every N steps")
 
+    # Performance
+    parser.add_argument("--no_bf16", action="store_true",
+                        help="Disable bf16 mixed precision (auto-enabled on CUDA)")
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="DataLoader workers (default: auto, 4 on CUDA)")
+
     # Output
     parser.add_argument("--output_dir", type=str, default="outputs/overfit_ntp",
                         help="Output directory")
@@ -374,17 +392,28 @@ def main():
             logger.error("No NTP data found. Run: python scripts/prepare_data.py --make-ablation")
             sys.exit(1)
 
-    logger.info(f"Data: {args.data_path}")
-    logger.info(f"Steps: {args.steps}  LR: {args.lr}  Batch: {args.batch_size}x{args.grad_accum}")
-    logger.info(f"Doc tokens: {args.max_doc_tokens}  Segment len: {args.segment_len}")
-
     # Device
     device = torch.device(
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
+
+    # Auto bf16 on CUDA (H200/A100/etc support bf16 natively)
+    use_bf16 = (device.type == "cuda" and not args.no_bf16
+                and torch.cuda.is_bf16_supported())
+
     logger.info(f"Device: {device}")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+        logger.info(f"GPU: {gpu_name} ({gpu_mem:.0f} GB)")
+    logger.info(f"bf16: {'ON' if use_bf16 else 'OFF'}")
+    logger.info(f"Data: {args.data_path}")
+    logger.info(f"Steps: {args.steps}  LR: {args.lr}  "
+                f"Batch: {args.batch_size}x{args.grad_accum} "
+                f"(effective {args.batch_size * args.grad_accum})")
+    logger.info(f"Doc tokens: {args.max_doc_tokens}  Segment len: {args.segment_len}")
 
     # Tokenizer
     from transformers import AutoTokenizer
@@ -407,7 +436,10 @@ def main():
     logger.info(f"Dataset: {n_total} total -> {n_train} train / {n_val} val")
 
     collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
-    num_workers = 0 if device.type == "mps" else 2
+    if args.num_workers is not None:
+        num_workers = args.num_workers
+    else:
+        num_workers = 4 if device.type == "cuda" else 0
     pin_memory = device.type == "cuda"
 
     train_loader = DataLoader(
@@ -437,13 +469,16 @@ def main():
                 f"({100*trainable/total:.1f}%)")
 
     # Train
-    best_ppl = train(model, train_loader, val_loader, config, device, args)
+    best_ppl = train(model, train_loader, val_loader, config, device, args,
+                     use_bf16=use_bf16)
 
     # Summary
     print("\n" + "=" * 60)
     print("  NTP OVERFIT STRESS TEST SUMMARY")
     print("=" * 60)
+    print(f"  Device:     {device} {'(bf16)' if use_bf16 else '(fp32)'}")
     print(f"  Data:       {args.data_path} ({n_train} train / {n_val} val)")
+    print(f"  Batch:      {args.batch_size}x{args.grad_accum} = {args.batch_size * args.grad_accum} effective")
     print(f"  Steps:      {args.steps}")
     print(f"  Best PPL:   {best_ppl:.1f}")
     print(f"  Output:     {args.output_dir}/")
