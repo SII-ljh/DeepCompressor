@@ -153,18 +153,32 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                 fwd_kwargs = _build_forward_kwargs(batch, mode, completed_steps)
 
                 # On-the-fly teacher distillation (QA mode only)
+                # Teacher sees full document + question + answer (uncompressed)
+                # and we extract only the Q+A tail for distillation targets.
                 if teacher_model is not None and mode == "qa":
                     with torch.no_grad():
+                        t_input_ids = torch.cat([
+                            batch["doc_input_ids"],
+                            batch["q_input_ids"],
+                            batch["answer_ids"],
+                        ], dim=1)
+                        t_attention_mask = torch.cat([
+                            batch["doc_attention_mask"],
+                            batch["q_attention_mask"],
+                            batch["answer_attention_mask"],
+                        ], dim=1)
                         t_out = teacher_model(
-                            input_ids=torch.cat([batch["q_input_ids"],
-                                                 batch["answer_ids"]], dim=1),
-                            attention_mask=torch.cat([batch["q_attention_mask"],
-                                                      batch["answer_attention_mask"]], dim=1),
+                            input_ids=t_input_ids,
+                            attention_mask=t_attention_mask,
                             output_hidden_states=True, use_cache=False,
                         )
-                        fwd_kwargs["teacher_logits"] = t_out.logits.detach()
+                        # Slice off the document prefix — keep only Q+A region
+                        doc_len = batch["doc_input_ids"].shape[1]
+                        fwd_kwargs["teacher_logits"] = \
+                            t_out.logits[:, doc_len:, :].detach()
                         fwd_kwargs["teacher_hidden"] = [
-                            h.detach() for h in t_out.hidden_states]
+                            h[:, doc_len:, :].detach()
+                            for h in t_out.hidden_states]
 
                 losses = model(**fwd_kwargs)
 

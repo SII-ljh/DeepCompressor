@@ -80,8 +80,8 @@ class LossConfig:
         default_factory=lambda: [7, 14, 21, 27]
     )
     qa_ce_weight: float = 1.0
-    kl_weight: float = 1.0
-    hidden_mse_weight: float = 1.0
+    kl_weight: float = 0.2
+    hidden_mse_weight: float = 0.0
     anchor_recon_weight: float = 0.5
 
 
