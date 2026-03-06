@@ -107,8 +107,8 @@ class TrainingHydraConf:
 
 @dataclass
 class AblationHydraConf:
-    down_proj_mode: str = "mlp"
-    up_proj_mode: str = "mlp"
+    down_proj_mode: str = "identity"
+    up_proj_mode: str = "identity"
     query_condition_on_question: bool = True
     enable_stage_a: bool = True
     enable_stage_b: bool = True

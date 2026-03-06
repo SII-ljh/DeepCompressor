@@ -108,9 +108,9 @@ class TrainingConfig:
 
 @dataclass
 class AblationConfig:
-    # Projection module mode: "mlp" (default) | "identity" | "linear"
-    down_proj_mode: str = "mlp"
-    up_proj_mode: str = "mlp"
+    # Projection module mode: "identity" (default) | "mlp" | "linear"
+    down_proj_mode: str = "identity"
+    up_proj_mode: str = "identity"
 
     # QueryInit: whether to condition on question
     query_condition_on_question: bool = True

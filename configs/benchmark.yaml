@@ -61,8 +61,8 @@ training:
   mixed_precision: "no"
 
 ablation:
-  down_proj_mode: mlp
-  up_proj_mode: mlp
+  down_proj_mode: identity
+  up_proj_mode: identity
   query_condition_on_question: true
   enable_stage_a: true
   enable_stage_b: true

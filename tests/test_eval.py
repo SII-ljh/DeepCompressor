@@ -139,7 +139,7 @@ def _make_tiny_model():
                         num_hidden_layers=4, vocab_size=100),
         finbert=FinBERTConfig(enabled=False, hidden_size=48),
         perceiver=PerceiverConfig(
-            perceiver_dim=32, num_queries=8, num_heads=4, head_dim=8,
+            perceiver_dim=64, num_queries=8, num_heads=4, head_dim=16,
             stage_a_cross_layers=1, stage_a_self_layers=1,
             stage_b_layers=1, stage_c_cross_layers=1, stage_c_self_layers=1,
             ff_mult=2, dropout=0.0),

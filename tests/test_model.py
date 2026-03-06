@@ -88,10 +88,9 @@ def test_frozen_params(tiny_config):
 def test_trainable_params(tiny_config):
     model = _make_model(tiny_config)
     trainable = {name for name, p in model.named_parameters() if p.requires_grad}
-    assert any("down_proj" in n for n in trainable)
+    # down_proj and up_mlp are identity by default (no params) — only check core trainable modules
     assert any("query_init" in n for n in trainable)
     assert any("perceiver" in n for n in trainable)
-    assert any("up_mlp" in n for n in trainable)
 
 
 def test_forward_ntp_returns_finite_loss(tiny_config, batch_size, doc_len):
