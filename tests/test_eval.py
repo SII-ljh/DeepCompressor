@@ -123,9 +123,8 @@ class _MockQwenModel(nn.Module):
                  max_new_tokens=16, do_sample=False, pad_token_id=0,
                  eos_token_id=None, **kw):
         B = inputs_embeds.shape[0]
-        input_len = inputs_embeds.shape[1]
-        # Fake: return input_len + max_new_tokens random ids
-        return torch.randint(0, 100, (B, input_len + max_new_tokens))
+        # HF generate() with inputs_embeds returns ONLY generated tokens
+        return torch.randint(0, 100, (B, max_new_tokens))
 
 
 def _make_tiny_model():

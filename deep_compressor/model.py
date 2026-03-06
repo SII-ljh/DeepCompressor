@@ -229,10 +229,9 @@ class DeepCompressor(nn.Module):
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
         )
-        # generate() returns full sequence including input positions;
-        # strip the input-length prefix to get only generated tokens
-        input_len = inputs_embeds.shape[1]
-        return out[:, input_len:]
+        # With inputs_embeds, generate() returns ONLY generated tokens
+        # (no input positions to strip), so return as-is.
+        return out
 
     def forward_ntp(self, doc_input_ids: torch.Tensor, doc_attention_mask: torch.Tensor,
                     segment_ids: torch.Tensor, segment_attention_mask: torch.Tensor,

@@ -111,7 +111,7 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                 train_loader: DataLoader, accelerator: Accelerator,
                 mode: str, eval_loader: DataLoader = None,
                 tokenizer=None, optuna_callback=None,
-                diagnostic_callback=None):
+                diagnostic_callback=None, teacher_model=None):
     """Train one stage (NTP or QA).
 
     Args:
@@ -120,6 +120,9 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
         tokenizer: required for QA eval (decoding generated tokens)
         optuna_callback: optional callable(step, metrics) for Optuna pruning
         diagnostic_callback: optional callable(step, model, accelerator) -> dict
+        teacher_model: optional frozen Qwen model for on-the-fly distillation
+                       (QA mode only). When provided, teacher logits/hidden states
+                       are computed per batch rather than pre-cached.
     """
     tcfg = config.training
 
@@ -148,6 +151,21 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
         for batch in train_loader:
             with accelerator.accumulate(model):
                 fwd_kwargs = _build_forward_kwargs(batch, mode, completed_steps)
+
+                # On-the-fly teacher distillation (QA mode only)
+                if teacher_model is not None and mode == "qa":
+                    with torch.no_grad():
+                        t_out = teacher_model(
+                            input_ids=torch.cat([batch["q_input_ids"],
+                                                 batch["answer_ids"]], dim=1),
+                            attention_mask=torch.cat([batch["q_attention_mask"],
+                                                      batch["answer_attention_mask"]], dim=1),
+                            output_hidden_states=True, use_cache=False,
+                        )
+                        fwd_kwargs["teacher_logits"] = t_out.logits.detach()
+                        fwd_kwargs["teacher_hidden"] = [
+                            h.detach() for h in t_out.hidden_states]
+
                 losses = model(**fwd_kwargs)
 
                 accelerator.backward(losses["total"])

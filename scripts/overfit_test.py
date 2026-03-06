@@ -428,14 +428,8 @@ def train_loop(model, dataloader, config, device, max_steps, stage_name, lr=1e-3
 
 @torch.no_grad()
 def evaluate(model, qa_data, tokenizer, device):
-    """Generate answers and compare with ground truth.
-
-    Note: we bypass model.generate_answer() because it has a known bug
-    when using inputs_embeds — HF generate() returns only new tokens,
-    but generate_answer() tries to slice off input_len positions.
-    """
+    """Generate answers and compare with ground truth."""
     model.eval()
-    embed_layer = model._get_qwen_embeddings()
     results = []
 
     for item in qa_data:
@@ -460,22 +454,10 @@ def evaluate(model, qa_data, tokenizer, device):
         latent = model.compress(queries, byte_array, byte_mask=doc_mask)
         prefix = model.up_mlp(latent)
 
-        # Generate — directly call qwen.generate to avoid the slicing bug
-        q_embeds = embed_layer(q_ids)
-        inputs_embeds = torch.cat([prefix, q_embeds], dim=1)
-        prefix_len = prefix.shape[1]
-        prefix_mask = torch.ones(1, prefix_len, device=device, dtype=q_mask.dtype)
-        attention_mask = torch.cat([prefix_mask, q_mask], dim=1)
-
-        gen_ids = model.qwen.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=64,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+        # Generate
+        gen_ids = model.generate_answer(
+            prefix, q_ids, q_mask, tokenizer=tokenizer, max_new_tokens=64,
         )
-        # With inputs_embeds, generate() returns ONLY generated tokens
         pred = tokenizer.decode(gen_ids[0], skip_special_tokens=True).strip()
 
         gold = item["answer"]
