@@ -4,22 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Deep Compressor** — compresses ultra-long financial texts (8K-64K tokens) into fixed-length latent vector sequences that serve as prefixes for a frozen Qwen decoder to answer detail-level financial questions. Teacher distillation ensures the compressed prefix carries information equivalent to the full document. FinBERT entity guidance is an optional enhancement module (default OFF).
+**Deep Compressor** — compresses ultra-long financial texts (8K-64K tokens) into fixed-length latent vector sequences that serve as prefixes for a frozen Qwen decoder to answer detail-level financial questions. Teacher distillation ensures the compressed prefix carries information equivalent to the full document.
 
-The architectural plan lives in `plan.md` (Chinese). The `FinBERT/` subdirectory is a cloned reference repo ([valuesimplex/FinBERT2](https://github.com/valuesimplex/FinBERT2)) used for NER and entity-level features.
+The architectural plan lives in `plan.md` (Chinese).
 
 ## Environment Setup
 
 ```bash
-conda create --name FinBERT python=3.11
-conda activate FinBERT
-pip install -r FinBERT/requirements.txt
+conda create --name deep_compressor python=3.11
+conda activate deep_compressor
 pip install -r requirements.txt
-```
-
-The conda env is at `/opt/homebrew/anaconda3/envs/FinBERT`. Use its Python directly when needed:
-```bash
-/opt/homebrew/anaconda3/envs/FinBERT/bin/python <script>
 ```
 
 ## Testing
@@ -35,9 +29,9 @@ python -m pytest tests/ --runslow
 python -m pytest tests/test_model.py -v
 ```
 
-67 tests across 14 files. Integration tests in `test_integration.py` are marked `@pytest.mark.slow` and skipped by default — they require the real Qwen model.
+69 tests across 14 files. Integration tests in `test_integration.py` are marked `@pytest.mark.slow` and skipped by default — they require the real Qwen model.
 
-**Test fixtures** (`tests/conftest.py`): `tiny_config` provides a `DeepCompressorConfig` with minimal dimensions (Qwen 64D/4 layers, Perceiver 32D/8 queries, FinBERT off) for fast unit tests. `tiny_config_finbert` is the same with FinBERT enabled. Tests use a `_MockQwenModel` in `test_model.py` that mimics the Qwen3 interface to avoid loading the real 600M-parameter model.
+**Test fixtures** (`tests/conftest.py`): `tiny_config` provides a `DeepCompressorConfig` with minimal dimensions (Qwen 64D/4 layers, Perceiver 32D/8 queries) for fast unit tests. Tests use a `_MockQwenModel` in `test_model.py` that mimics the Qwen3 interface to avoid loading the real 600M-parameter model.
 
 ## Training
 
@@ -118,6 +112,13 @@ python scripts/diagnostics/post_training.py \
 
 Legacy `scripts/diagnostic.py` still works but emits a DeprecationWarning.
 
+### Progressive Overfitting Tests
+
+`scripts/overfitting/` contains a 3-step progressive validation suite:
+1. `step1_single_sample.py` — overfit on 1 sample (loss should → 0)
+2. `step2_memorize_tiny.py` — memorize ~50 samples
+3. `step3_ablation_full.py` — full ablation on real data
+
 ### Ablation, HP Search, Benchmark
 
 ```bash
@@ -144,20 +145,27 @@ python scripts/benchmark.py \
 
 ## Architecture
 
-### Data Flow (5 stages)
+### Key Design Constraint: Sequence-Length-Only Compression
 
-1. **Document Encoding** — Frozen Qwen encoder -> hidden states -> `DownProj` -> `byte_array` in Perceiver dimension.
-2. **Entity Guidance (optional, default OFF)** — Frozen FinBERT + NER Head -> `anchor_embs` (via `AnchorAlign`) + `anchor_scores`.
-3. **Query Encoding** — Frozen Qwen encoder -> mean-pooled question vector -> `QueryInit` (learnable base queries + question additive bias) -> initial query vectors.
-4. **Compression** — `GuidedPerceiver` with three stages:
-   - Stage A: global cross-attention from `byte_array` (with optional `anchor_scores` bias) + self-attention.
-   - Stage B: anchor refinement cross-attention (FinBERT ON) or extra self-attention (FinBERT OFF).
+For known Qwen3 models, `__post_init__` forces `perceiver_dim = qwen.hidden_size` (e.g., 1024 for Qwen3-0.6B). This means DownProj/UpProj default to **identity** mode (no parameters) — compression happens purely via sequence length reduction (doc_len → num_queries), not dimensionality reduction. The MLP/linear projection modes exist for ablation experiments only.
+
+Multi-model support: `QWEN3_REGISTRY` in `config.py` maps Qwen3-0.6B through 8B, auto-resolving hidden_size/num_layers/vocab_size and recomputing `perceiver_dim` and `head_dim`.
+
+### Data Flow (4 stages)
+
+1. **Document Encoding** — Frozen Qwen encoder (`self.qwen.model(...)`) -> hidden states -> `DownProj` (identity by default) -> `byte_array` in Perceiver dimension.
+2. **Query Encoding** — Frozen Qwen encoder -> mean-pooled question vector -> `QueryInit` (learnable base queries + question additive bias) -> initial query vectors. For NTP (Stage 1), question vector is zero → pure base queries.
+3. **Compression** — `GuidedPerceiver` with three stages:
+   - Stage A: global cross-attention from `byte_array` + self-attention.
+   - Stage B: self-attention.
    - Stage C: deep reasoning cross-attention back to `byte_array` + multi-layer self-attention -> fixed-length `latent_array`.
-5. **Generation** — `UpMLP` maps `latent_array` back to Qwen dimension -> prefix + question tokens -> frozen Qwen decoder -> answer.
+4. **Generation** — `UpMLP` (identity by default) maps `latent_array` back to Qwen dimension -> prefix + question tokens -> frozen Qwen decoder -> answer.
 
 ### Gradient Flow
 
 Frozen Qwen forward passes run inside `torch.no_grad()` context managers. Trainable modules (`DownProj`, `QueryInit`, `GuidedPerceiver`, `UpMLP`) are called **outside** the no-grad context to preserve gradient flow. The teacher path (same frozen Qwen reading full uncompressed document) is inference-only with no gradients.
+
+**Critical**: The encoder calls `self.qwen.model(...)` (the inner transformer), NOT `self.qwen(...)` (which also computes the LM head logits). Using `self.qwen(...)` for encoding wastes ~15GB on unused logits and causes OOM.
 
 ### Distillation
 
@@ -171,7 +179,7 @@ Two paths producing the same validated `DeepCompressorConfig`:
 1. **YAML + `DeepCompressorConfig.from_yaml(path)`** — used by all scripts.
 2. **Hydra + `RunConf` in `hydra_conf.py`** — used for CLI override workflows.
 
-Config hierarchy: `DeepCompressorConfig` wraps `QwenConfig`, `FinBERTConfig`, `PerceiverConfig`, `ProjectionConfig`, `LossConfig`, `TrainingConfig`, `AblationConfig`. `__post_init__` validates constraints like `num_heads * head_dim == perceiver_dim`.
+Config hierarchy: `DeepCompressorConfig` wraps `QwenConfig`, `PerceiverConfig`, `ProjectionConfig`, `LossConfig`, `TrainingConfig`, `AblationConfig`. `__post_init__` validates constraints (`num_heads * head_dim == perceiver_dim`), auto-resolves Qwen3 specs from `QWEN3_REGISTRY`, and forces `perceiver_dim = qwen.hidden_size`.
 
 ### Ablation Infrastructure
 
@@ -181,16 +189,17 @@ Factory functions `build_down_proj()` and `build_up_proj()` create projection mo
 
 ## Implementation Notes
 
-- **Frozen vs trainable**: All Qwen/FinBERT params have `requires_grad=False`. Trainable: DownProj, QueryInit, GuidedPerceiver, UpMLP; optionally AnchorAlign, NERHead, FactDecodeHead.
+- **Frozen vs trainable**: All Qwen params have `requires_grad=False`. Trainable: QueryInit, GuidedPerceiver; optionally DownProj, UpMLP (only when not identity mode).
 - **Checkpoint saving**: Only trainable weights are saved (skips `qwen.*` parameters).
 - **Lazy loading**: `NTPDataset` uses byte offsets into JSONL files to avoid loading multi-GB data into memory.
 - **Distributed training**: Uses HuggingFace `accelerate` for automatic DDP + device placement.
-- **Teacher caching**: For 64K inputs, pre-compute and cache teacher logits/hidden states to manage GPU memory.
-- **Tokenizer alignment**: FinBERT-Qwen alignment in `tokenizer_align.py` uses character-level span overlap with max aggregation.
-- **Evaluation metrics**: Exact match for numeric questions, F1 for overall QA quality. Chinese text normalization handled via jieba.
+- **Teacher distillation**: Teacher sees full uncompressed doc+question+answer, student sees compressed prefix+question+answer. Teacher logits/hidden sliced to Q+A region only for loss computation.
+- **Evaluation metrics**: Exact match for numeric questions, F1 for overall QA quality. Chinese text normalization splits CJK per-character.
 
-## FinBERT Toggle
+## Known Pitfalls (from past bugs)
 
-Controlled by `finbert.enabled` config flag. When OFF (default): no FinBERT/NER/AnchorAlign modules loaded, Stage B degrades to self-attention, no anchor_scores bias, no auxiliary anchor reconstruction loss. System is fully functional without FinBERT.
-
-Entity types when enabled: ORG, PER, METRIC, VALUE, DATE, EVENT, PRODUCT.
+- **Encoder must use `self.qwen.model(...)` not `self.qwen(...)`** — the LM head computes 15GB of unused logits, causing OOM.
+- **NTP labels: do NOT manually shift** — Qwen's `forward(labels=...)` shifts internally. Double-shifting causes PPL plateau at ~510.
+- **Gradient checkpointing requires `use_reentrant=False`** — call `gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})`. Without this kwarg, gradients silently break.
+- **MLP projection bottleneck** — `down_proj_mode="mlp"` with `down_hidden=768` creates a 1024→768 bottleneck that blocks convergence. Default is now `identity`.
+- **MPS num_workers** — macOS MPS doesn't support multi-process data loading reliably; `num_workers` is forced to 0 on MPS devices.

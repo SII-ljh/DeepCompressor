@@ -4,7 +4,6 @@ import pytest
 
 from deep_compressor.config import (
     DeepCompressorConfig,
-    FinBERTConfig,
     LossConfig,
     PerceiverConfig,
     ProjectionConfig,
@@ -17,7 +16,6 @@ def test_default_config():
     cfg = DeepCompressorConfig()
     assert cfg.qwen.hidden_size == 1024
     assert cfg.perceiver.perceiver_dim == 1024
-    assert cfg.finbert.enabled is False
     assert cfg.training.stage == 1
 
 
@@ -47,7 +45,6 @@ def test_hidden_layer_validation():
 def test_nested_configs():
     cfg = DeepCompressorConfig()
     assert isinstance(cfg.qwen, QwenConfig)
-    assert isinstance(cfg.finbert, FinBERTConfig)
     assert isinstance(cfg.perceiver, PerceiverConfig)
     assert isinstance(cfg.projection, ProjectionConfig)
     assert isinstance(cfg.loss, LossConfig)

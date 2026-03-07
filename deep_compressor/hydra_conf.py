@@ -16,7 +16,6 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from deep_compressor.config import (
     AblationConfig,
     DeepCompressorConfig,
-    FinBERTConfig,
     LossConfig,
     PerceiverConfig,
     ProjectionConfig,
@@ -39,16 +38,6 @@ class QwenHydraConf:
 
 
 @dataclass
-class FinBERTHydraConf:
-    enabled: bool = False
-    model_name_or_path: str = "valuesimplex/FinBERT2"
-    hidden_size: int = 768
-    num_ner_labels: int = 15
-    top_k_anchors: int = 32
-    anchor_align_layers: int = 3
-
-
-@dataclass
 class PerceiverHydraConf:
     perceiver_dim: int = 1024
     num_queries: int = 64
@@ -60,7 +49,6 @@ class PerceiverHydraConf:
     stage_c_cross_layers: int = 2
     stage_c_self_layers: int = 4
     ff_mult: int = 4
-    anchor_score_scale_init: float = 1.0
     dropout: float = 0.1
 
 
@@ -81,7 +69,6 @@ class LossHydraConf:
     qa_ce_weight: float = 1.0
     kl_weight: float = 1.0
     hidden_mse_weight: float = 1.0
-    anchor_recon_weight: float = 0.5
 
 
 @dataclass
@@ -138,7 +125,6 @@ class WandbConf:
 @dataclass
 class RunConf:
     qwen: QwenHydraConf = field(default_factory=QwenHydraConf)
-    finbert: FinBERTHydraConf = field(default_factory=FinBERTHydraConf)
     perceiver: PerceiverHydraConf = field(default_factory=PerceiverHydraConf)
     projection: ProjectionHydraConf = field(default_factory=ProjectionHydraConf)
     loss: LossHydraConf = field(default_factory=LossHydraConf)
@@ -165,7 +151,6 @@ def to_deep_compressor_config(cfg: DictConfig) -> DeepCompressorConfig:
     """
     return DeepCompressorConfig(
         qwen=QwenConfig(**OmegaConf.to_container(cfg.qwen, resolve=True)),
-        finbert=FinBERTConfig(**OmegaConf.to_container(cfg.finbert, resolve=True)),
         perceiver=PerceiverConfig(**OmegaConf.to_container(cfg.perceiver, resolve=True)),
         projection=ProjectionConfig(**OmegaConf.to_container(cfg.projection, resolve=True)),
         loss=LossConfig(**OmegaConf.to_container(cfg.loss, resolve=True)),

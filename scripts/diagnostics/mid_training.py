@@ -233,14 +233,8 @@ def run_stagewise_info_gain(
 
         # Stage B
         if perceiver.enable_stage_b:
-            if perceiver.finbert_enabled:
-                # FinBERT mode: anchor cross-attention (but no anchors available
-                # in NTP mode, so fallback to self-attn)
-                for block in perceiver.stage_b_self:
-                    x = block(x)
-            else:
-                for block in perceiver.stage_b_self:
-                    x = block(x)
+            for block in perceiver.stage_b_self:
+                x = block(x)
             checkpoints["after_stage_b"] = _loss_from_latent(x)
 
         # Stage C

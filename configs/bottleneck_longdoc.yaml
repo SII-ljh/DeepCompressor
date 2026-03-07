@@ -1,0 +1,71 @@
+# Bottleneck experiment config — long documents on MacBook
+# Tests whether Perceiver cross-attention outperforms simple pooling on long sequences
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  hidden_size: 1024
+  num_hidden_layers: 28
+  vocab_size: 151936
+  max_doc_tokens: 2048      # ← long docs to test cross-attention value
+  max_question_tokens: 64
+  max_answer_tokens: 64
+
+perceiver:
+  perceiver_dim: 1024
+  num_queries: 64
+  num_heads: 16
+  head_dim: 64
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 200
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 1.0
+  hidden_mse_weight: 1.0
+
+training:
+  stage: 1
+  learning_rate: 5.0e-4
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  max_steps: 2000
+  warmup_steps: 30
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 10
+  eval_every: 100
+  save_every: 100
+  output_dir: outputs
+  ntp_segment_len: 128       # ← longer segments for more context
+  gradient_checkpointing: true
+  mixed_precision: "no"
+
+# ── runtime ──
+data_path: ???
+eval_data_path: null
+resume_from: null
+max_eval_samples: 0
+max_train_samples: 0
+
+wandb:
+  enabled: false
+  project: deep-compressor-debug
+  entity: null
+  run_name: null
+  tags: []
+  offline: true

@@ -32,7 +32,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from deep_compressor.config import (
     AblationConfig,
     DeepCompressorConfig,
-    FinBERTConfig,
     LossConfig,
     PerceiverConfig,
     ProjectionConfig,
@@ -62,7 +61,6 @@ def build_config(args) -> DeepCompressorConfig:
             vocab_size=151936,
             max_doc_tokens=args.max_doc_tokens,
         ),
-        finbert=FinBERTConfig(enabled=False),
         perceiver=PerceiverConfig(
             perceiver_dim=1024,
             num_queries=args.num_queries,
@@ -74,7 +72,6 @@ def build_config(args) -> DeepCompressorConfig:
             stage_c_cross_layers=2,
             stage_c_self_layers=4,
             ff_mult=4,
-            anchor_score_scale_init=1.0,
             dropout=0.0,
         ),
         projection=ProjectionConfig(
@@ -86,7 +83,6 @@ def build_config(args) -> DeepCompressorConfig:
             qa_ce_weight=1.0,
             kl_weight=0.0,
             hidden_mse_weight=0.0,
-            anchor_recon_weight=0.0,
         ),
         training=TrainingConfig(
             stage=1,

@@ -9,10 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from deep_compressor.config import DeepCompressorConfig
 from deep_compressor.loss import DistillationLoss, compute_total_loss
-from deep_compressor.modules.anchor_align import AnchorAlign
 from deep_compressor.modules.down_proj import build_down_proj
-from deep_compressor.modules.fact_decode_head import FactDecodeHead
-from deep_compressor.modules.ner_head import NERHead
 from deep_compressor.modules.perceiver import GuidedPerceiver
 from deep_compressor.modules.query_init import QueryInit
 from deep_compressor.modules.up_mlp import build_up_proj
@@ -55,8 +52,6 @@ class DeepCompressor(nn.Module):
             stage_b_layers=config.effective_stage_b_layers,
             stage_c_cross_layers=config.effective_stage_c_cross_layers,
             stage_c_self_layers=config.effective_stage_c_self_layers,
-            finbert_enabled=config.finbert.enabled,
-            anchor_score_scale_init=pcfg.anchor_score_scale_init,
             enable_stage_a=abcfg.enable_stage_a,
             enable_stage_b=abcfg.enable_stage_b,
             enable_stage_c=abcfg.enable_stage_c,
@@ -64,14 +59,6 @@ class DeepCompressor(nn.Module):
         self.up_mlp = build_up_proj(
             abcfg.up_proj_mode, pcfg.perceiver_dim, qcfg.hidden_size,
             pjcfg.up_hidden, pjcfg.dropout)
-
-        # FinBERT optional modules
-        if config.finbert.enabled:
-            self.anchor_align = AnchorAlign(
-                config.finbert.hidden_size, pcfg.perceiver_dim, config.finbert.anchor_align_layers,
-            )
-            self.ner_head = NERHead(config.finbert.hidden_size, config.finbert.num_ner_labels)
-            self.fact_decode_head = FactDecodeHead(pcfg.perceiver_dim, config.finbert.hidden_size)
 
         # Distillation loss helper
         self.distill_loss = DistillationLoss(
@@ -138,18 +125,13 @@ class DeepCompressor(nn.Module):
         return self.query_init(pooled)
 
     def compress(self, queries: torch.Tensor, byte_array: torch.Tensor,
-                 byte_mask: Optional[torch.Tensor] = None,
-                 anchor_scores: Optional[torch.Tensor] = None,
-                 anchor_embs: Optional[torch.Tensor] = None) -> torch.Tensor:
+                 byte_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Run Perceiver compression.
 
         Returns:
             latent_array: (batch, num_queries, perceiver_dim)
         """
-        return self.perceiver(
-            queries, byte_array, byte_mask=byte_mask,
-            anchor_scores=anchor_scores, anchor_embs=anchor_embs,
-        )
+        return self.perceiver(queries, byte_array, byte_mask=byte_mask)
 
     def decode(self, prefix_embeds: torch.Tensor, suffix_ids: torch.Tensor,
                suffix_attention_mask: torch.Tensor,
@@ -266,9 +248,6 @@ class DeepCompressor(nn.Module):
                    teacher_logits: Optional[torch.Tensor] = None,
                    teacher_hidden: Optional[list] = None,
                    global_step: int = 0,
-                   anchor_scores: Optional[torch.Tensor] = None,
-                   anchor_embs: Optional[torch.Tensor] = None,
-                   original_anchors: Optional[torch.Tensor] = None,
                    ) -> Dict[str, torch.Tensor]:
         """QA + distillation forward pass.
 
@@ -280,19 +259,13 @@ class DeepCompressor(nn.Module):
             teacher_logits: (batch, qa_len, vocab) — pre-computed teacher logits
             teacher_hidden: list of (batch, qa_len, dim) — pre-computed teacher hidden states
             global_step: current training step
-            anchor_scores: (batch, doc_len) — FinBERT entity scores (optional)
-            anchor_embs: (batch, top_k, perceiver_dim) — aligned anchor embeddings (optional)
-            original_anchors: (batch, top_k, finbert_dim) — original FinBERT anchors (optional)
         Returns:
             dict with 'total' and all loss components
         """
         byte_array = self.encode_document(doc_input_ids, doc_attention_mask)
         queries = self.encode_question(q_input_ids, q_attention_mask)
 
-        latent_array = self.compress(
-            queries, byte_array, byte_mask=doc_attention_mask,
-            anchor_scores=anchor_scores, anchor_embs=anchor_embs,
-        )
+        latent_array = self.compress(queries, byte_array, byte_mask=doc_attention_mask)
         prefix_embeds = self.up_mlp(latent_array)
 
         # Concatenate question + answer as suffix
@@ -343,18 +316,11 @@ class DeepCompressor(nn.Module):
                 student_hidden, teacher_hidden, shared_mask, global_step,
             )
 
-        # Anchor reconstruction loss
-        anchor_recon_loss = None
-        if self.config.finbert.enabled and original_anchors is not None:
-            anchor_recon_loss = self.fact_decode_head(latent_array, original_anchors)
-
         return compute_total_loss(
             qa_ce_loss,
             kl_loss=kl_loss,
             hidden_mse_loss=hidden_mse_loss,
-            anchor_recon_loss=anchor_recon_loss,
             qa_ce_weight=lcfg.qa_ce_weight,
             kl_weight=lcfg.kl_weight,
             hidden_mse_weight=lcfg.hidden_mse_weight,
-            anchor_recon_weight=lcfg.anchor_recon_weight,
         )

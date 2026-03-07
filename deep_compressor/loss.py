@@ -78,11 +78,9 @@ def compute_total_loss(
     qa_ce_loss: torch.Tensor,
     kl_loss: Optional[torch.Tensor] = None,
     hidden_mse_loss: Optional[torch.Tensor] = None,
-    anchor_recon_loss: Optional[torch.Tensor] = None,
     qa_ce_weight: float = 1.0,
     kl_weight: float = 1.0,
     hidden_mse_weight: float = 1.0,
-    anchor_recon_weight: float = 0.5,
 ) -> Dict[str, torch.Tensor]:
     """Combine all loss components with weights.
 
@@ -97,9 +95,6 @@ def compute_total_loss(
     if hidden_mse_loss is not None:
         total = total + hidden_mse_weight * hidden_mse_loss
         components["hidden_mse"] = hidden_mse_loss
-    if anchor_recon_loss is not None:
-        total = total + anchor_recon_weight * anchor_recon_loss
-        components["anchor_recon"] = anchor_recon_loss
 
     components["total"] = total
     return components

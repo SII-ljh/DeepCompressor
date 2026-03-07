@@ -10,9 +10,6 @@ qwen:
   max_question_tokens: 64   # ← reduced from 256
   max_answer_tokens: 64     # ← reduced from 512
 
-finbert:
-  enabled: false
-
 perceiver:
   perceiver_dim: 1024
   num_queries: 64
@@ -24,7 +21,6 @@ perceiver:
   stage_c_cross_layers: 2
   stage_c_self_layers: 4
   ff_mult: 4
-  anchor_score_scale_init: 1.0
   dropout: 0.1
 
 projection:
@@ -39,7 +35,6 @@ loss:
   qa_ce_weight: 1.0
   kl_weight: 1.0
   hidden_mse_weight: 1.0
-  anchor_recon_weight: 0.5
 
 training:
   stage: 1

@@ -24,8 +24,6 @@
 - **第一阶段（NTP 预训练）**：压缩文档，在随机段上做 next-token prediction。不需要标注数据，解决冷启动问题。
 - **第二阶段（QA 微调 + 蒸馏）**：联合训练 QA 交叉熵 + KL 蒸馏 + 隐藏状态 MSE 对齐。
 
-**可选 FinBERT 增强**：通过 FinBERT NER 锚点提供实体级注意力引导（默认关闭）。
-
 ## 项目结构
 
 ```
@@ -42,11 +40,7 @@ DeepCompressor/
 │       ├── down_proj.py      # Qwen 维度 → Perceiver 维度
 │       ├── up_mlp.py         # Perceiver 维度 → Qwen 维度
 │       ├── query_init.py     # 可学习查询 + 问题偏置
-│       ├── perceiver.py      # 三阶段引导式 Perceiver
-│       ├── anchor_align.py   # FinBERT → Perceiver 对齐（可选）
-│       ├── ner_head.py       # NER 分类头（可选）
-│       ├── fact_decode_head.py  # 事实解码头（可选）
-│       └── tokenizer_align.py   # FinBERT-Qwen 分词器对齐
+│       └── perceiver.py      # 三阶段引导式 Perceiver
 ├── configs/                  # YAML 配置文件
 │   ├── default.yaml          # 完整训练配置
 │   ├── tiny_subset.yaml      # 快速迭代配置（小数据集）
@@ -67,7 +61,6 @@ DeepCompressor/
 │       ├── mid_training.py   # 实验 4-5：查询多样性、逐阶段信息增益
 │       └── post_training.py  # 实验 6-9：注意力模式、压缩保真度、长度缩放、蒸馏
 ├── tests/                    # 单元测试 + 集成测试（pytest）
-├── FinBERT/                  # FinBERT2 参考仓库（valuesimplex/FinBERT2）
 ├── plan.md                   # 详细技术计划书（中文）
 ├── CLAUDE.md                 # AI 辅助开发指引
 └── requirements.txt          # 项目依赖
@@ -82,17 +75,13 @@ DeepCompressor/
 #### 1.1 创建 conda 环境
 
 ```bash
-conda create --name FinBERT python=3.11
-conda activate FinBERT
+conda create --name deep_compressor python=3.11
+conda activate deep_compressor
 ```
 
 #### 1.2 安装依赖
 
 ```bash
-# 先安装 FinBERT 基础 ML 依赖
-pip install -r FinBERT/requirements.txt
-
-# 再安装项目依赖（实验追踪、配置管理等）
 pip install -r requirements.txt
 ```
 

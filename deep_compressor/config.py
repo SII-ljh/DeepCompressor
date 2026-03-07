@@ -40,16 +40,6 @@ class QwenConfig:
 
 
 @dataclass
-class FinBERTConfig:
-    enabled: bool = False
-    model_name_or_path: str = "valuesimplex/FinBERT2"
-    hidden_size: int = 768
-    num_ner_labels: int = 15  # BIO tags for 7 entity types + O
-    top_k_anchors: int = 32
-    anchor_align_layers: int = 3
-
-
-@dataclass
 class PerceiverConfig:
     perceiver_dim: int = 1024
     num_queries: int = 64
@@ -61,7 +51,6 @@ class PerceiverConfig:
     stage_c_cross_layers: int = 2
     stage_c_self_layers: int = 4
     ff_mult: int = 4
-    anchor_score_scale_init: float = 1.0
     dropout: float = 0.1
 
 
@@ -82,7 +71,6 @@ class LossConfig:
     qa_ce_weight: float = 1.0
     kl_weight: float = 0.2
     hidden_mse_weight: float = 0.0
-    anchor_recon_weight: float = 0.5
 
 
 @dataclass
@@ -138,7 +126,6 @@ class AblationConfig:
 @dataclass
 class DeepCompressorConfig:
     qwen: QwenConfig = field(default_factory=QwenConfig)
-    finbert: FinBERTConfig = field(default_factory=FinBERTConfig)
     perceiver: PerceiverConfig = field(default_factory=PerceiverConfig)
     projection: ProjectionConfig = field(default_factory=ProjectionConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -235,7 +222,6 @@ class DeepCompressorConfig:
             raw = yaml.safe_load(f)
         return cls(
             qwen=QwenConfig(**raw.get("qwen", {})),
-            finbert=FinBERTConfig(**raw.get("finbert", {})),
             perceiver=PerceiverConfig(**raw.get("perceiver", {})),
             projection=ProjectionConfig(**raw.get("projection", {})),
             loss=LossConfig(**raw.get("loss", {})),

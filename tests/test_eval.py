@@ -150,7 +150,7 @@ class _MockQwenModel(nn.Module):
 
 def _make_tiny_model():
     from deep_compressor.config import (
-        DeepCompressorConfig, FinBERTConfig, LossConfig,
+        DeepCompressorConfig, LossConfig,
         PerceiverConfig, ProjectionConfig, QwenConfig, TrainingConfig,
     )
     from deep_compressor.model import DeepCompressor
@@ -158,7 +158,6 @@ def _make_tiny_model():
     cfg = DeepCompressorConfig(
         qwen=QwenConfig(model_name_or_path="tiny", hidden_size=64,
                         num_hidden_layers=4, vocab_size=100),
-        finbert=FinBERTConfig(enabled=False, hidden_size=48),
         perceiver=PerceiverConfig(
             perceiver_dim=64, num_queries=8, num_heads=4, head_dim=16,
             stage_a_cross_layers=1, stage_a_self_layers=1,
