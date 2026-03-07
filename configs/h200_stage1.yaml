@@ -1,7 +1,8 @@
 # ── Stage 1 NTP Pretraining: 8×H200, Qwen3-0.6B, full dataset ──
 #
-# Effective batch size: 8 GPU × 4 batch × 4 acc = 128
+# Effective batch size: 8 GPU × 16 batch × 1 acc = 128
 # Original config:     1 GPU × 4 batch × 4 acc = 16  (8× smaller)
+# max_doc_tokens reduced to 512 (covers 82% samples, eliminates padding waste)
 #
 # LR scaled by sqrt(8) ≈ 2.8×: 1e-4 → 2.5e-4
 # Max steps reduced proportionally: 50K → 8000  (same total samples seen)
@@ -12,7 +13,7 @@
 
 qwen:
   model_name_or_path: "models/Qwen3-0.6B"
-  max_doc_tokens: 8192
+  max_doc_tokens: 512
   max_question_tokens: 256
   max_answer_tokens: 512
 
@@ -43,8 +44,8 @@ loss:
 training:
   stage: 1
   learning_rate: 2.5e-4
-  batch_size: 4
-  gradient_accumulation_steps: 4
+  batch_size: 16
+  gradient_accumulation_steps: 1
   max_steps: 8000
   warmup_steps: 300
   weight_decay: 0.01
