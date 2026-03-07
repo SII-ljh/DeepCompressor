@@ -213,13 +213,15 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                     avg_loss = accelerator.gather(avg_tensor).mean().item()
                     if accelerator.is_main_process:
                         lr = scheduler.get_last_lr()[0]
+                        ppl = torch.exp(torch.tensor(avg_loss)).item()
                         logger.info(
                             f"[{mode.upper()}] step {completed_steps}/{tcfg.max_steps}  "
-                            f"loss={avg_loss:.4f}  lr={lr:.2e}")
+                            f"loss={avg_loss:.4f}  ppl={ppl:.2f}  lr={lr:.2e}")
 
                         # log to wandb via accelerator
                         log_dict = {
                             f"{mode}/loss": avg_loss,
+                            f"{mode}/ppl": ppl,
                             f"{mode}/lr": lr,
                         }
                         for k, v in running_components.items():
