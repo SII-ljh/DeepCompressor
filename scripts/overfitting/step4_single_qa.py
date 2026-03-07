@@ -43,6 +43,7 @@ from deep_compressor.config import (
     TrainingConfig,
 )
 from deep_compressor.data import PaddingCollator, QADataset
+from deep_compressor.eval import compute_exact_match, compute_f1
 from deep_compressor.model import DeepCompressor
 
 logging.basicConfig(
@@ -277,6 +278,54 @@ def evaluate_qa(model, loader, device, use_bf16=False):
     avg_loss = total_loss / max(total_samples, 1)
     model.train()
     return {"loss": avg_loss}
+
+
+@torch.no_grad()
+def evaluate_qa_generation(model, loader, tokenizer, device, use_bf16=False,
+                           max_new_tokens=128, max_show=5):
+    """Generate answers and compute EM/F1 against ground truth."""
+    model.eval()
+    all_em, all_f1 = [], []
+    examples = []
+
+    for batch in loader:
+        batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+
+        with autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            byte_array = model.encode_document(
+                batch_dev["doc_input_ids"], batch_dev["doc_attention_mask"])
+            queries = model.encode_question(
+                batch_dev["q_input_ids"], batch_dev["q_attention_mask"])
+            latent = model.compress(
+                queries, byte_array, byte_mask=batch_dev["doc_attention_mask"])
+            prefix_embeds = model.up_mlp(latent)
+
+            gen_ids = model.generate_answer(
+                prefix_embeds, batch_dev["q_input_ids"],
+                batch_dev["q_attention_mask"],
+                tokenizer=tokenizer, max_new_tokens=max_new_tokens,
+            )
+
+        preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        golds = batch_dev["answer_text"]
+
+        for pred, gold in zip(preds, golds):
+            em = compute_exact_match(pred, gold)
+            f1 = compute_f1(pred, gold)
+            all_em.append(em)
+            all_f1.append(f1)
+            if len(examples) < max_show:
+                examples.append({"pred": pred, "gold": gold, "em": em, "f1": f1})
+
+    n = max(len(all_em), 1)
+    metrics = {
+        "exact_match": sum(all_em) / n,
+        "f1": sum(all_f1) / n,
+        "n_samples": len(all_em),
+    }
+    model.train()
+    return metrics, examples
 
 
 # ── Training loops ────────────────────────────────────────────────────
@@ -675,6 +724,11 @@ def main():
     qa_ckpt = os.path.join(args.output_dir, "phase2_final.pt")
     _save_trainable(model_qa, qa_ckpt)
 
+    # Generation evaluation on the training sample
+    logger.info("Running generation evaluation...")
+    gen_metrics, gen_examples = evaluate_qa_generation(
+        model_qa, qa_loader, tokenizer, device, use_bf16=use_bf16)
+
     csv_file.close()
     elapsed = time.time() - t0
 
@@ -691,16 +745,25 @@ def main():
     print(f"  Data:         {args.data_path} (1 sample)")
     print(f"  Phase 1:      {args.ntp_steps} NTP steps -> PPL {phase1_ppl:.1f}")
     print(f"  Phase 2:      {args.qa_steps} QA steps -> loss {phase2_loss:.4f}")
+    print(f"  QA EM:        {gen_metrics['exact_match']:.1%}")
+    print(f"  QA F1:        {gen_metrics['f1']:.1%}")
     print(f"  Elapsed:      {elapsed:.0f}s ({elapsed/60:.1f}min)")
     print(f"  Output:       {args.output_dir}/")
-    print(f"  Curve CSV:    {csv_path}")
 
-    if phase2_loss < 0.5:
-        print("\n  PASS: QA loss < 0.5 — model can overfit a single QA sample")
-    elif phase2_loss < 2.0:
-        print("\n  PARTIAL: QA loss 0.5-2.0 — learning but not fully memorized, try more steps")
+    # Show generated vs gold for each sample
+    for i, ex in enumerate(gen_examples):
+        print(f"\n  --- Sample {i+1} ---")
+        print(f"  Gold:   {ex['gold'][:200]}")
+        print(f"  Pred:   {ex['pred'][:200]}")
+        print(f"  EM={ex['em']:.0f}  F1={ex['f1']:.2f}")
+
+    # Pass/fail verdict
+    if gen_metrics["f1"] >= 0.8:
+        print(f"\n  PASS: F1 >= 80% — model can generate correct answer")
+    elif phase2_loss < 0.5:
+        print(f"\n  PARTIAL: loss < 0.5 but F1 {gen_metrics['f1']:.1%} — generation may need tuning")
     else:
-        print("\n  FAIL: QA loss > 2.0 — QA path not learning, investigate")
+        print(f"\n  FAIL: loss > 0.5, F1 {gen_metrics['f1']:.1%} — QA path not working")
     print("=" * 60)
 
 
