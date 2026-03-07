@@ -29,7 +29,7 @@ class DeepCompressor(nn.Module):
             self.qwen = qwen_model
         else:
             self.qwen = AutoModelForCausalLM.from_pretrained(
-                qcfg.model_name_or_path, torch_dtype=torch.float32,
+                qcfg.model_name_or_path, dtype=torch.float32,
             )
         for p in self.qwen.parameters():
             p.requires_grad = False

@@ -324,7 +324,7 @@ def _run_training(config: DeepCompressorConfig,
     tcfg = config.training
 
     # ── accelerator ──
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 
     log_with = []
     if wandb_conf and getattr(wandb_conf, "enabled", False):
