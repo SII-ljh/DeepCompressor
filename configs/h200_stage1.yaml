@@ -5,11 +5,10 @@
 # max_doc_tokens reduced to 512 (covers 82% samples, eliminates padding waste)
 #
 # LR scaled by sqrt(8) ≈ 2.8×: 1e-4 → 2.5e-4
-# Max steps reduced proportionally: 50K → 8000  (same total samples seen)
-#   Original: 50K × 16 = 800K samples
-#   Now:      8K × 128 = 1.024M samples (~similar, slightly more)
+# Max steps: 50K (full training, ~2.3 epochs over 2.72M samples)
+#   Total samples seen: 50K × 128 = 6.4M
 #
-# Warmup kept at ~4%: 300 steps
+# Warmup: 1K steps (~2%)
 
 qwen:
   model_name_or_path: "models/Qwen3-0.6B"
@@ -46,8 +45,8 @@ training:
   learning_rate: 2.5e-4
   batch_size: 16
   gradient_accumulation_steps: 1
-  max_steps: 8000
-  warmup_steps: 300
+  max_steps: 50000
+  warmup_steps: 1000
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
