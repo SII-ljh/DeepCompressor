@@ -15,6 +15,7 @@ class _FakeTokenizer:
         self.pad_token_id = 0
         self.pad_token = "<pad>"
         self.eos_token = "<eos>"
+        self.eos_token_id = 2
 
     def __call__(self, text, truncation=True, max_length=512, return_tensors="pt", padding=False):
         # Deterministic: each char becomes a token id

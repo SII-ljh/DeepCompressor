@@ -115,14 +115,20 @@ class QADataset(Dataset):
                              return_tensors="pt", padding=False)
         question = self.tokenizer(item["question"], truncation=True, max_length=self.max_question_tokens,
                                   return_tensors="pt", padding=False)
-        answer = self.tokenizer(item["answer"], truncation=True, max_length=self.max_answer_tokens,
+        # Reserve 1 token for EOS so truncation leaves room
+        answer = self.tokenizer(item["answer"], truncation=True, max_length=self.max_answer_tokens - 1,
                                 return_tensors="pt", padding=False)
+        answer_ids = answer["input_ids"].squeeze(0)
+
+        # Append EOS token so the model learns to stop generating
+        eos = torch.tensor([self.tokenizer.eos_token_id], dtype=answer_ids.dtype)
+        answer_ids = torch.cat([answer_ids, eos])
 
         return {
             "doc_input_ids": doc["input_ids"].squeeze(0),
             "q_input_ids": question["input_ids"].squeeze(0),
-            "answer_ids": answer["input_ids"].squeeze(0),
-            "answer_labels": answer["input_ids"].squeeze(0),
+            "answer_ids": answer_ids,
+            "answer_labels": answer_ids.clone(),
             "answer_text": item["answer"],
         }
 
