@@ -11,7 +11,7 @@
 # Warmup kept at ~4%: 300 steps
 
 qwen:
-  model_name_or_path: "Qwen/Qwen3-0.6B"
+  model_name_or_path: "models/Qwen3-0.6B"
   max_doc_tokens: 8192
   max_question_tokens: 256
   max_answer_tokens: 512

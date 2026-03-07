@@ -9,6 +9,7 @@
 #   2. pip install -r requirements.txt
 #   3. python scripts/prepare_data.py          # full dataset (~1-2h)
 #   4. Verify: ls data/ntp_train.jsonl
+#   5. Verify: ls models/Qwen3-0.6B/           # local model
 
 set -euo pipefail
 
@@ -18,10 +19,20 @@ if [ ! -f "data/ntp_train.jsonl" ]; then
     exit 1
 fi
 
+if [ ! -d "models/Qwen3-0.6B" ]; then
+    echo "ERROR: models/Qwen3-0.6B/ not found. Download the model first."
+    exit 1
+fi
+
 # ── NCCL tuning for H200 ──
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=5
 export TOKENIZERS_PARALLELISM=false
+
+# ── Offline mode (no internet access on cluster) ──
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export WANDB_MODE=offline
 
 # ── Launch ──
 accelerate launch \
