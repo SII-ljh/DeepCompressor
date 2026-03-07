@@ -1,6 +1,6 @@
 # ── Stage 1 NTP Pretraining: 8×H200, Qwen3-0.6B, full dataset ──
 #
-# Effective batch size: 8 GPU × 8 batch × 2 acc = 128
+# Effective batch size: 8 GPU × 4 batch × 4 acc = 128
 # Original config:     1 GPU × 4 batch × 4 acc = 16  (8× smaller)
 #
 # LR scaled by sqrt(8) ≈ 2.8×: 1e-4 → 2.5e-4
@@ -43,8 +43,8 @@ loss:
 training:
   stage: 1
   learning_rate: 2.5e-4
-  batch_size: 8
-  gradient_accumulation_steps: 2
+  batch_size: 4
+  gradient_accumulation_steps: 4
   max_steps: 8000
   warmup_steps: 300
   weight_decay: 0.01

@@ -29,7 +29,7 @@ class DeepCompressor(nn.Module):
             self.qwen = qwen_model
         else:
             self.qwen = AutoModelForCausalLM.from_pretrained(
-                qcfg.model_name_or_path, dtype=torch.float32,
+                qcfg.model_name_or_path, torch_dtype=torch.bfloat16,
             )
         for p in self.qwen.parameters():
             p.requires_grad = False
@@ -96,7 +96,7 @@ class DeepCompressor(nn.Module):
         with torch.no_grad():
             outputs = self.qwen.model(
                 input_ids=doc_input_ids, attention_mask=doc_attention_mask,
-                output_hidden_states=True, use_cache=False,
+                output_hidden_states=False, use_cache=False,
             )
             hidden = outputs.last_hidden_state.detach()  # (B, doc_len, qwen_dim)
         # DownProj is trainable — must run outside no_grad
@@ -115,7 +115,7 @@ class DeepCompressor(nn.Module):
         with torch.no_grad():
             outputs = self.qwen.model(
                 input_ids=q_input_ids, attention_mask=q_attention_mask,
-                output_hidden_states=True, use_cache=False,
+                output_hidden_states=False, use_cache=False,
             )
             hidden = outputs.last_hidden_state  # (B, q_len, qwen_dim)
             mask_expanded = q_attention_mask.unsqueeze(-1).float()
