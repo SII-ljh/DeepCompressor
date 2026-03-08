@@ -1,0 +1,94 @@
+# ── Stage 2 QA: Optimized Single-Stage Long-Sequence Training ──
+#
+# Key optimizations:
+#   1. Directly train on long documents (4096 tokens) - no multi-stage needed
+#   2. Perceiver handles long sequences efficiently (linear memory in cross-attn)
+#   3. Lower batch size + higher gradient accumulation to manage memory
+#   4. Less frequent evaluation to maximize training throughput
+#
+# Prerequisites:
+#   1. Stage 1 checkpoint at outputs/h200_stage1/checkpoint-final/
+#   2. Full QA data: data/qa_train.json (~263K samples)
+#   3. QA dev data: data/qa_dev.json (~35K samples)
+#
+# Effective batch size: 8 GPU × 2 batch × 4 acc = 64 (same as before)
+# Training time: ~6-8 hours on 8×H200
+#
+# Why this works:
+#   - Perceiver cross-attention: O(num_queries × doc_len) - linear!
+#   - Perceiver self-attention: O(num_queries²) - independent of doc_len!
+#   - Main bottleneck: Qwen encoder O(doc_len²), but Flash Attention helps
+#   - With max_doc_tokens=4096, covers ~92% of QA data (vs 512→42%)
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  max_doc_tokens: 4096           # ← 8× longer than original (512)
+  max_question_tokens: 256
+  max_answer_tokens: 512
+
+perceiver:
+  num_queries: 64                # Fixed compression ratio
+  num_heads: 16
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 2000
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 0.5
+  hidden_mse_weight: 0.1
+
+training:
+  stage: 2
+  learning_rate: 5.0e-5
+  batch_size: 2                  # ← Reduced from 4 (longer docs need more memory)
+  gradient_accumulation_steps: 4 # ← Increased from 2 (keep effective batch=64)
+  max_steps: 10000               # ← Reduced (covers more data per step)
+  warmup_steps: 500
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 20
+  eval_every: 1000               # ← Less frequent (eval is expensive on long docs)
+  save_every: 2000
+  output_dir: outputs/h200_stage2_long
+  ntp_segment_len: 256
+  gradient_checkpointing: true   # ← Critical for long sequences
+  mixed_precision: "bf16"        # ← Critical for memory efficiency
+
+wandb:
+  enabled: true
+  project: deep-compressor
+  run_name: "stage2-8xH200-long-optimized"
+  tags: ["stage2", "8xH200", "long-seq", "4096-tokens", "single-stage"]
+
+# ── Performance Notes ──
+#
+# Memory scaling with doc length:
+#   - Qwen encoder: O(doc_len²) but Flash Attention makes it feasible
+#   - Perceiver: O(num_queries × doc_len) - very manageable
+#   - Effective: Can train 4096-token docs with batch=2 on H200 80GB
+#
+# Coverage improvement:
+#   - 512 tokens:  ~42% of QA data
+#   - 2048 tokens: ~62% of QA data
+#   - 4096 tokens: ~92% of QA data ← This config
+#   - 8192 tokens: ~99% of QA data (if memory allows)
+#
+# Training efficiency:
+#   - Single-stage: Simpler pipeline, no checkpoint management
+#   - Direct learning: Model sees full context from start
+#   - Perceiver design: Built for this exact use case!

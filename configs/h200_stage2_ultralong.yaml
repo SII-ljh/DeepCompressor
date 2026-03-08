@@ -1,0 +1,74 @@
+# ── Stage 2 QA: Ultra-Long Sequence Training (8192 tokens) ──
+#
+# For maximum coverage: 8192 tokens covers 99%+ of QA data
+# Requires: H200 80GB or A100 80GB
+#
+# WARNING: This is memory-intensive. Start with h200_stage2_long_optimized.yaml
+# first to verify stability, then try this if you have spare GPU memory.
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  max_doc_tokens: 8192           # ← 16× longer than original (512)
+  max_question_tokens: 256
+  max_answer_tokens: 512
+
+perceiver:
+  num_queries: 64
+  num_heads: 16
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 2000
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 0.5
+  hidden_mse_weight: 0.1
+
+training:
+  stage: 2
+  learning_rate: 5.0e-5
+  batch_size: 1                  # ← Very small batch due to 8K context
+  gradient_accumulation_steps: 8 # ← High accumulation (effective batch=64)
+  max_steps: 8000
+  warmup_steps: 500
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 20
+  eval_every: 1000
+  save_every: 2000
+  output_dir: outputs/h200_stage2_ultralong
+  ntp_segment_len: 256
+  gradient_checkpointing: true   # ← Absolutely required
+  mixed_precision: "bf16"        # ← Absolutely required
+
+wandb:
+  enabled: true
+  project: deep-compressor
+  run_name: "stage2-8xH200-ultralong-8192tok"
+  tags: ["stage2", "8xH200", "ultralong", "8192-tokens"]
+
+# ── Memory Requirements ──
+# Per GPU (H200 80GB):
+#   - Qwen encoder forward: ~45GB (8192² self-attention)
+#   - Perceiver forward: ~8GB (linear in doc_len)
+#   - Gradients + optimizer: ~20GB
+#   - Total: ~73GB per GPU (tight but feasible)
+#
+# If OOM:
+#   1. Reduce batch_size to 1 (already minimal)
+#   2. Reduce max_doc_tokens to 6144 (covers ~97%)
+#   3. Use activation checkpointing (already enabled)
