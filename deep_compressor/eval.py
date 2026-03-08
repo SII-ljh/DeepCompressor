@@ -257,21 +257,33 @@ def evaluate_ntp(model, eval_loader: DataLoader,
 
                 # Encode and compress
                 byte_array = unwrapped.encode_document(doc_ids, doc_mask)
-                queries = unwrapped.encode_question(None, None)  # No question for NTP
+                # For NTP, use zero question vector → pure base queries
+                B = doc_ids.shape[0]
+                zero_pooled = torch.zeros(B, unwrapped.config.qwen.hidden_size,
+                                         device=doc_ids.device)
+                queries = unwrapped.query_init(zero_pooled)
                 latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
                 prefix_embeds = unwrapped.up_mlp(latent)
 
-                # Generate continuation (first 20 tokens of segment)
+                # Generate continuation (first 20 tokens)
                 max_gen = min(20, segment_ids.shape[1])
-                gen_ids = unwrapped.generate_answer(
-                    prefix_embeds,
-                    torch.tensor([[]], dtype=torch.long, device=doc_ids.device),  # empty question
-                    torch.tensor([[]], dtype=torch.long, device=doc_ids.device),
-                    tokenizer=tokenizer,
+
+                # For NTP, directly use prefix_embeds without question
+                # Create attention mask for prefix
+                prefix_len = prefix_embeds.shape[1]
+                prefix_mask = torch.ones(B, prefix_len, device=prefix_embeds.device)
+
+                # Generate using only prefix embeddings
+                gen_ids = unwrapped.qwen.generate(
+                    inputs_embeds=prefix_embeds,
+                    attention_mask=prefix_mask,
                     max_new_tokens=max_gen,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                 )
 
-                # Decode
+                # Decode (generate returns only new tokens when using inputs_embeds)
                 pred_text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
                 gold_text = tokenizer.decode(segment_ids[0, :max_gen], skip_special_tokens=True)
 
