@@ -34,4 +34,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
     --stage 1 \
     --wandb \
     --wandb_project deep-compressor \
+    --wandb_offline \
     2>&1 | tee logs/q32_$(date +%Y%m%d_%H%M%S).log
