@@ -22,7 +22,9 @@ class DownProj(nn.Module):
         Returns:
             (batch, seq_len, perceiver_dim)
         """
-        return self.net(x)
+        # Align dtype with first layer's weights to avoid BFloat16/Float32 mismatch
+        target_dtype = next(self.net.parameters()).dtype
+        return self.net(x.to(target_dtype))
 
 
 class IdentityProj(nn.Module):
@@ -43,7 +45,9 @@ class LinearProj(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        # Align dtype with first layer's weights to avoid BFloat16/Float32 mismatch
+        target_dtype = next(self.net.parameters()).dtype
+        return self.net(x.to(target_dtype))
 
 
 def build_down_proj(mode: str, qwen_dim: int, perceiver_dim: int,

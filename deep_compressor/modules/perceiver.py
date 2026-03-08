@@ -36,8 +36,9 @@ class PerceiverCrossAttention(nn.Module):
             (batch, q_len, dim)
         """
         residual = q
-        q = self.norm_q(q)
-        kv = self.norm_kv(kv)
+        # Align dtype with norm layer weights to avoid BFloat16/Float32 mismatch
+        q = self.norm_q(q.to(self.norm_q.weight.dtype))
+        kv = self.norm_kv(kv.to(self.norm_kv.weight.dtype))
 
         B, Q, _ = q.shape
         _, S, _ = kv.shape
@@ -83,7 +84,8 @@ class PerceiverSelfAttention(nn.Module):
             (batch, seq_len, dim)
         """
         residual = x
-        x = self.norm(x)
+        # Align dtype with norm layer weights to avoid BFloat16/Float32 mismatch
+        x = self.norm(x.to(self.norm.weight.dtype))
 
         B, N, _ = x.shape
         H = self.num_heads
@@ -115,7 +117,8 @@ class PerceiverFeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.net(self.norm(x))
+        # Align dtype with norm layer weights to avoid BFloat16/Float32 mismatch
+        return x + self.net(self.norm(x.to(self.norm.weight.dtype)))
 
 
 class PerceiverBlock(nn.Module):
@@ -231,4 +234,5 @@ class GuidedPerceiver(nn.Module):
             for block in self.stage_c_self:
                 x = block(x)
 
-        return self.final_norm(x)
+        # Align dtype with norm layer weights to avoid BFloat16/Float32 mismatch
+        return self.final_norm(x.to(self.final_norm.weight.dtype))

@@ -24,7 +24,9 @@ class UpMLP(nn.Module):
         Returns:
             (batch, num_queries, qwen_dim)
         """
-        return self.net(x)
+        # Align dtype with first layer's weights to avoid BFloat16/Float32 mismatch
+        target_dtype = next(self.net.parameters()).dtype
+        return self.net(x.to(target_dtype))
 
 
 def build_up_proj(mode: str, perceiver_dim: int, qwen_dim: int,

@@ -21,8 +21,10 @@ class QueryInit(nn.Module):
             (batch, num_queries, perceiver_dim) — initial query vectors
         """
         B = question_pooled.shape[0]
+        # Align dtype with base_queries to ensure consistency
+        target_dtype = self.base_queries.dtype
         if self.condition_on_question:
-            bias = self.question_proj(question_pooled).unsqueeze(1)  # (batch, 1, perceiver_dim)
+            bias = self.question_proj(question_pooled.to(target_dtype)).unsqueeze(1)  # (batch, 1, perceiver_dim)
         else:
             bias = 0
         queries = self.base_queries.unsqueeze(0) + bias  # (batch, num_queries, perceiver_dim)
