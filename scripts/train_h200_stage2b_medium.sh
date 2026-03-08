@@ -53,6 +53,7 @@ accelerate launch \
     --eval_data_path data/qa_dev_filtered_512_2048.json \
     --resume_from outputs/h200_stage2a/checkpoint-final \
     --stage 2 \
+    --max_eval_samples 500 \
     --wandb \
     --wandb_project deep-compressor \
     --wandb_run_name "stage2b-8xH200-0.6B-qa-medium"

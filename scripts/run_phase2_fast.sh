@@ -22,7 +22,7 @@ echo "  2K NTP + 1K QA per experiment"
 echo "============================================"
 echo ""
 
-COMMON="--data_path $NTP_DATA --qa_data_path $QA_TRAIN --eval_data_path $QA_DEV --mixed_precision bf16 --batch_size 16 --fast"
+COMMON="--data_path $NTP_DATA --qa_data_path $QA_TRAIN --eval_data_path $QA_DEV --mixed_precision bf16 --batch_size 16 --fast --max_eval_samples 200"
 
 launch_all "$OUTDIR" "$LOGDIR" "$COMMON"
 wait_all

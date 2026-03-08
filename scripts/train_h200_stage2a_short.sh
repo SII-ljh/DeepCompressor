@@ -53,6 +53,7 @@ accelerate launch \
     --eval_data_path data/qa_dev_filtered_512.json \
     --resume_from outputs/h200_stage1/checkpoint-final \
     --stage 2 \
+    --max_eval_samples 500 \
     --wandb \
     --wandb_project deep-compressor \
     --wandb_run_name "stage2a-8xH200-0.6B-qa-short"
