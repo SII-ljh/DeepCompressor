@@ -1,0 +1,67 @@
+# ── Stage 2 QA Fine-tuning + Distillation: 8×H200, Qwen3-0.6B ──
+#
+# Prerequisites:
+#   1. Stage 1 checkpoint at outputs/h200_stage1/checkpoint-final/
+#   2. QA training data at data/qa_train.json
+#   3. QA dev data at data/qa_dev.json
+#
+# Effective batch size: 8 GPU × 4 batch × 2 acc = 64
+# (Reduced from Stage 1 due to distillation memory overhead)
+#
+# max_doc_tokens: 512 (same as Stage 1)
+# Total QA samples: ~230K (SQuAD + CMRC + DuReader + TriviaQA + DRCD)
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  max_doc_tokens: 512
+  max_question_tokens: 256
+  max_answer_tokens: 512
+
+perceiver:
+  num_queries: 64
+  num_heads: 16
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 2000
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 0.5              # Distillation weight (lower than Stage 1 NTP)
+  hidden_mse_weight: 0.1      # Hidden state alignment weight
+
+training:
+  stage: 2
+  learning_rate: 5.0e-5        # Lower LR for fine-tuning (10× smaller than Stage 1)
+  batch_size: 4                # Smaller due to distillation memory overhead
+  gradient_accumulation_steps: 2
+  max_steps: 20000             # ~5.7 epochs over 230K samples
+  warmup_steps: 500
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 20
+  eval_every: 500
+  save_every: 2000
+  output_dir: outputs/h200_stage2
+  ntp_segment_len: 256         # Not used in Stage 2, kept for config compatibility
+  gradient_checkpointing: true
+  mixed_precision: "bf16"
+
+wandb:
+  enabled: true
+  project: deep-compressor
+  run_name: "stage2-8xH200-0.6B-qa"
+  tags: ["stage2", "8xH200", "0.6B", "qa", "distillation"]
