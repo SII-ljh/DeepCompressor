@@ -268,12 +268,11 @@ def evaluate_ntp(model, eval_loader: DataLoader,
                 # Generate continuation (first 20 tokens)
                 max_gen = min(20, segment_ids.shape[1])
 
-                # Get Qwen's embedding dtype for consistency
+                # Use segment_ids[:1] as a dummy to get correct embedding dtype
+                # Then align prefix_embeds dtype (same as decode() method)
                 embed_layer = unwrapped.qwen.get_input_embeddings()
-                target_dtype = next(embed_layer.parameters()).dtype
-
-                # Align prefix_embeds dtype to match Qwen's embeddings
-                prefix_embeds = prefix_embeds.to(dtype=target_dtype)
+                dummy_embeds = embed_layer(segment_ids[:, :1])  # (1, 1, D)
+                prefix_embeds = prefix_embeds.to(dtype=dummy_embeds.dtype)
 
                 # Create attention mask for prefix
                 prefix_len = prefix_embeds.shape[1]
