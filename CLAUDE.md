@@ -83,6 +83,71 @@ python scripts/prepare_data.py --make-all-subsets # all subsets (tiny, dev, abla
 
 Downloads Qwen3-0.6B to `models/Qwen3-0.6B/` and builds NTP/QA datasets into `data/`. Key subsets: `ntp_tiny.jsonl` (50 samples), `qa_tiny_*.json` (50/20 samples), `ablation/` (5% of total data, stratified by source).
 
+## Stage 1 Varying Query (Q) Experiments
+
+**NEW**: Automated workflow for training multiple Stage 1 models with different `num_queries` values to find the optimal compression ratio.
+
+### Quick Start
+
+```bash
+# One-command full pipeline: data prep + training + evaluation
+bash scripts/run_full_experiment.sh
+
+# Or manual steps:
+# 1. Filter data (keep docs < 512 tokens)
+python scripts/filter_ntp_data.py \
+    --input data/ntp_train.jsonl \
+    --output data/ntp_train_512.jsonl \
+    --max_length 512
+
+# 2. Train all Q values (16, 32, 64, 128, 256)
+python scripts/train_stage1_varying_q.py
+
+# 3. Evaluate all checkpoints
+python scripts/evaluate_all_checkpoints.py \
+    --eval_data data/ntp_train_512.jsonl \
+    --stage 1 \
+    --output results/stage1_results.csv
+```
+
+### Files Created
+
+- `configs/stage1_q{16,32,64,128,256}.yaml` — configs for each Q value
+- `scripts/filter_ntp_data.py` — filter training data by length
+- `scripts/train_stage1_varying_q.py` — batch training for all Q values
+- `scripts/evaluate_all_checkpoints.py` — auto-discover and eval all checkpoints
+- `scripts/analyze_data_distribution.py` — analyze document length distribution
+- `scripts/run_full_experiment.sh` — one-click full pipeline
+- `scripts/STAGE1_VARYING_Q_EXPERIMENTS.md` — detailed documentation
+- `scripts/QUICKSTART_STAGE1_Q_EXPERIMENTS.md` — quick reference
+
+### Training Output
+
+Each Q value saves to separate directory: `outputs/stage1_q{16,32,64,128,256}/checkpoint-final/`.
+
+### Evaluation Output
+
+Produces comparison table and CSV:
+```
+Q      | perplexity | loss
+--------------------------------
+16     |    28.45   |  3.35
+32     |    25.12   |  3.22
+64     |    23.57   |  3.16
+128    |    22.89   |  3.13
+256    |    22.35   |  3.11
+```
+
+### Sample Display During Eval
+
+**NEW**: Both NTP and QA evaluation now display sample predictions during training:
+- NTP: Shows compressed prefix → generated continuation vs gold
+- QA: Shows question → prediction vs gold answer (with EM/F1)
+
+Modified functions:
+- `evaluate_ntp(..., tokenizer, show_sample=True)` — now displays sample predictions
+- `evaluate_qa(..., show_samples=5)` — already had this feature, now more prominent
+
 ## Running Experiments
 
 ### Diagnostics (9 experiments, 3 phases)

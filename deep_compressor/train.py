@@ -246,7 +246,8 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                     model.eval()
                     if mode == "ntp":
                         metrics = evaluate_ntp(model, eval_loader,
-                                               accelerator)
+                                               accelerator, tokenizer=tokenizer,
+                                               show_sample=True)
                         if accelerator.is_main_process:
                             logger.info(
                                 f"[NTP EVAL] step {completed_steps}  "

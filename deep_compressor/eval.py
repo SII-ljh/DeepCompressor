@@ -210,19 +210,25 @@ def evaluate_qa_multi_ref(model, eval_loader: DataLoader, tokenizer,
 
 @torch.no_grad()
 def evaluate_ntp(model, eval_loader: DataLoader,
-                 accelerator: Accelerator) -> Dict[str, float]:
+                 accelerator: Accelerator,
+                 tokenizer=None,
+                 show_sample: bool = True) -> Dict[str, float]:
     """Evaluate NTP model on validation set, returning perplexity and loss.
 
     Args:
         model: DeepCompressor (already wrapped by accelerator)
         eval_loader: DataLoader for NTP validation data (already prepared)
         accelerator: Accelerator instance
+        tokenizer: Optional tokenizer for displaying sample predictions
+        show_sample: Whether to show a sample prediction
     Returns:
         {"perplexity": float, "loss": float}
     """
     model.eval()
+    unwrapped = accelerator.unwrap_model(model)
     total_loss = 0.0
     total_samples = 0
+    sample_shown = False
 
     for batch in eval_loader:
         losses = model(
@@ -238,6 +244,47 @@ def evaluate_ntp(model, eval_loader: DataLoader,
 
         total_loss += loss_val * bs
         total_samples += bs
+
+        # Show one sample prediction (only on main process, only first batch)
+        if (show_sample and not sample_shown and tokenizer is not None
+                and accelerator.is_main_process):
+            try:
+                # Take first sample from batch
+                doc_ids = batch["doc_input_ids"][:1]
+                doc_mask = batch["doc_attention_mask"][:1]
+                segment_ids = batch["segment_ids"][:1]
+                segment_mask = batch["segment_attention_mask"][:1]
+
+                # Encode and compress
+                byte_array = unwrapped.encode_document(doc_ids, doc_mask)
+                queries = unwrapped.encode_question(None, None)  # No question for NTP
+                latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
+                prefix_embeds = unwrapped.up_mlp(latent)
+
+                # Generate continuation (first 20 tokens of segment)
+                max_gen = min(20, segment_ids.shape[1])
+                gen_ids = unwrapped.generate_answer(
+                    prefix_embeds,
+                    torch.tensor([[]], dtype=torch.long, device=doc_ids.device),  # empty question
+                    torch.tensor([[]], dtype=torch.long, device=doc_ids.device),
+                    tokenizer=tokenizer,
+                    max_new_tokens=max_gen,
+                )
+
+                # Decode
+                pred_text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+                gold_text = tokenizer.decode(segment_ids[0, :max_gen], skip_special_tokens=True)
+
+                print("\n" + "="*80)
+                print("  Sample NTP Prediction")
+                print("="*80)
+                print(f"Prediction: {pred_text[:200]}...")
+                print(f"Gold:       {gold_text[:200]}...")
+                print("="*80 + "\n")
+
+                sample_shown = True
+            except Exception as e:
+                print(f"Warning: Failed to show sample prediction: {e}")
 
     # Gather across processes
     stats = torch.tensor([total_loss, float(total_samples)],
