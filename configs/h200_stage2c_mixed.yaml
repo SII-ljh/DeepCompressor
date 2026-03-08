@@ -1,0 +1,66 @@
+# ── Stage 2c: QA Fine-tuning on MIXED lengths (0-2048 tokens) ──
+#
+# Prerequisites: Stage 2b checkpoint at outputs/h200_stage2b/checkpoint-final/
+#
+# Strategy: After mastering short (0-512) and medium (512-2048) separately,
+# now train on the full mixture (0-2048) to consolidate capabilities across
+# all length ranges.
+#
+# Effective batch size: 8 GPU × 4 batch × 2 acc = 64
+# Mixed QA samples (0-2048 tokens): ~163K samples (62% of total)
+# 8K steps × 64 = 512K samples (~3 epochs over 163K)
+
+qwen:
+  model_name_or_path: "models/Qwen3-0.6B"
+  max_doc_tokens: 2048
+  max_question_tokens: 256
+  max_answer_tokens: 512
+
+perceiver:
+  num_queries: 64
+  num_heads: 16
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 1000
+  hidden_distill_layers: [7, 14, 21, 27]
+  qa_ce_weight: 1.0
+  kl_weight: 0.5
+  hidden_mse_weight: 0.1
+
+training:
+  stage: 2
+  learning_rate: 2.0e-5        # Lower for final convergence
+  batch_size: 4
+  gradient_accumulation_steps: 2
+  max_steps: 8000
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 20
+  eval_every: 500
+  save_every: 2000
+  output_dir: outputs/h200_stage2c
+  ntp_segment_len: 256
+  gradient_checkpointing: true
+  mixed_precision: "bf16"
+
+wandb:
+  enabled: true
+  project: deep-compressor
+  run_name: "stage2c-8xH200-0.6B-qa-mixed"
+  tags: ["stage2c", "8xH200", "0.6B", "qa", "mixed-lengths", "0-2048"]

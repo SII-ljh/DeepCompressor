@@ -20,8 +20,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 
 def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
-                   max_doc_tokens: int):
-    """Filter QA dataset to only include samples with doc_len <= max_doc_tokens."""
+                   min_doc_tokens: int, max_doc_tokens: int):
+    """Filter QA dataset to only include samples with min_doc_tokens <= doc_len <= max_doc_tokens."""
 
     print(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -32,7 +32,10 @@ def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
 
     total = len(data)
     print(f"Total samples: {total:,}")
-    print(f"Filtering to max_doc_tokens <= {max_doc_tokens}...\n")
+    if min_doc_tokens > 0:
+        print(f"Filtering to {min_doc_tokens} <= doc_tokens <= {max_doc_tokens}...\n")
+    else:
+        print(f"Filtering to doc_tokens <= {max_doc_tokens}...\n")
 
     filtered = []
     for i, item in enumerate(data):
@@ -44,7 +47,7 @@ def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
                           return_tensors="pt", padding=False)
         doc_len = tokens["input_ids"].shape[1]
 
-        if doc_len <= max_doc_tokens:
+        if min_doc_tokens <= doc_len <= max_doc_tokens:
             filtered.append(item)
 
     print(f"\n\nFiltered results:")
@@ -64,6 +67,10 @@ def main():
         description="Filter QA dataset by document length"
     )
     parser.add_argument(
+        "--min_tokens", type=int, default=0,
+        help="Minimum document tokens (default: 0)"
+    )
+    parser.add_argument(
         "--max_tokens", type=int, default=512,
         help="Maximum document tokens (default: 512)"
     )
@@ -81,23 +88,32 @@ def main():
     )
     args = parser.parse_args()
 
+    # Generate output filename
+    if args.min_tokens > 0:
+        suffix = f"{args.min_tokens}_{args.max_tokens}"
+    else:
+        suffix = f"{args.max_tokens}"
+
     # Filter train
-    output_train = DATA_DIR / f"qa_train_filtered_{args.max_tokens}.json"
+    output_train = DATA_DIR / f"qa_train_filtered_{suffix}.json"
     filter_qa_data(args.input_train, str(output_train),
-                   args.tokenizer, args.max_tokens)
+                   args.tokenizer, args.min_tokens, args.max_tokens)
 
     print("\n" + "=" * 70 + "\n")
 
     # Filter dev (usually already short, but filter anyway for consistency)
-    output_dev = DATA_DIR / f"qa_dev_filtered_{args.max_tokens}.json"
+    output_dev = DATA_DIR / f"qa_dev_filtered_{suffix}.json"
     filter_qa_data(args.input_dev, str(output_dev),
-                   args.tokenizer, args.max_tokens)
+                   args.tokenizer, args.min_tokens, args.max_tokens)
 
     print("\n" + "=" * 70)
     print("Summary:")
     print(f"  Train: {output_train}")
     print(f"  Dev:   {output_dev}")
-    print("\nUse these files for Stage 2a training with max_doc_tokens={args.max_tokens}")
+    if args.min_tokens > 0:
+        print(f"\nUse these files for training with {args.min_tokens} <= doc_tokens <= {args.max_tokens}")
+    else:
+        print(f"\nUse these files for training with doc_tokens <= {args.max_tokens}")
 
 
 if __name__ == "__main__":
