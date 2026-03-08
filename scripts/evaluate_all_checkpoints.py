@@ -253,7 +253,11 @@ def main():
     logger.info(f"Found {len(checkpoint_dirs)} checkpoints to evaluate")
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained(
+        "models/Qwen3-0.6B",
+        trust_remote_code=True,
+        fix_mistral_regex=True
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

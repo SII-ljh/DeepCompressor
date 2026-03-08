@@ -376,7 +376,11 @@ def _run_training(config: DeepCompressorConfig,
         )
 
     # ── tokenizer ──
-    tokenizer = AutoTokenizer.from_pretrained(config.qwen.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.qwen.model_name_or_path,
+        trust_remote_code=True,
+        fix_mistral_regex=True  # Fix tokenizer regex warning
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
