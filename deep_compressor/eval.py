@@ -258,7 +258,8 @@ def evaluate_ntp(model, eval_loader: DataLoader,
 @torch.no_grad()
 def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
                 accelerator: Accelerator,
-                max_new_tokens: int = 64) -> Dict[str, float]:
+                max_new_tokens: int = 64,
+                show_samples: int = 5) -> Dict[str, float]:
     """Evaluate QA model on dev set, returning Exact Match and F1.
 
     Args:
@@ -267,6 +268,7 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
         tokenizer: Qwen tokenizer for decoding generated tokens
         accelerator: Accelerator instance
         max_new_tokens: max tokens to generate per answer
+        show_samples: number of sample predictions to display (0 = none)
     Returns:
         {"exact_match": float, "f1": float}
     """
@@ -275,6 +277,7 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
 
     all_em = []
     all_f1 = []
+    sample_outputs = []  # Store samples for display
 
     total_batches = len(eval_loader)
     for batch_idx, batch in enumerate(eval_loader):
@@ -301,6 +304,21 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
         preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         golds = batch["answer_text"]  # list of str
 
+        # Store samples for display (only from main process, only first few)
+        if accelerator.is_main_process and len(sample_outputs) < show_samples and "question_text" in batch:
+            questions = batch.get("question_text", [""] * len(preds))
+            for q, pred, gold in zip(questions, preds, golds):
+                if len(sample_outputs) < show_samples:
+                    em = compute_exact_match(pred, gold)
+                    f1 = compute_f1(pred, gold)
+                    sample_outputs.append({
+                        "question": q,
+                        "prediction": pred,
+                        "gold": gold,
+                        "em": em,
+                        "f1": f1,
+                    })
+
         for pred, gold in zip(preds, golds):
             all_em.append(compute_exact_match(pred, gold))
             all_f1.append(compute_f1(pred, gold))
@@ -320,6 +338,22 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
     local_f1_sum = torch.tensor([sum(all_f1)], device=accelerator.device)
     gathered_em = accelerator.gather(local_em_sum).sum().item()
     gathered_f1 = accelerator.gather(local_f1_sum).sum().item()
+
+    # Display sample predictions (only on main process)
+    if accelerator.is_main_process and sample_outputs:
+        print("\n" + "="*80)
+        print("  Sample Predictions (first {} examples)".format(len(sample_outputs)))
+        print("="*80)
+        for i, sample in enumerate(sample_outputs, 1):
+            print(f"\n[Sample {i}]")
+            if sample["question"]:
+                print(f"Question:   {sample['question'][:100]}{'...' if len(sample['question']) > 100 else ''}")
+            print(f"Prediction: {sample['prediction']}")
+            print(f"Gold:       {sample['gold']}")
+            print(f"EM: {sample['em']:.0f}  F1: {sample['f1']:.4f}")
+            if i < len(sample_outputs):
+                print("-" * 80)
+        print("="*80 + "\n")
 
     return {
         "exact_match": gathered_em / total_count,

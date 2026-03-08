@@ -255,7 +255,8 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                     else:
                         metrics = evaluate_qa(
                             model, eval_loader, tokenizer, accelerator,
-                            max_new_tokens=config.qwen.max_answer_tokens)
+                            max_new_tokens=config.qwen.max_answer_tokens,
+                            show_samples=5)  # Show 5 sample predictions
                         if accelerator.is_main_process:
                             logger.info(
                                 f"[QA EVAL] step {completed_steps}  "
