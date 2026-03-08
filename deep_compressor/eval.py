@@ -276,7 +276,12 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
     all_em = []
     all_f1 = []
 
-    for batch in eval_loader:
+    total_batches = len(eval_loader)
+    for batch_idx, batch in enumerate(eval_loader):
+        # Log progress every 10 batches (only on main process)
+        if accelerator.is_main_process and batch_idx % 10 == 0:
+            print(f"  [EVAL] Processing batch {batch_idx}/{total_batches} "
+                  f"({100*batch_idx/total_batches:.1f}%)", flush=True)
         # Encode document and compress to prefix
         byte_array = unwrapped.encode_document(
             batch["doc_input_ids"], batch["doc_attention_mask"])
