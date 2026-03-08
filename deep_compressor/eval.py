@@ -268,7 +268,13 @@ def evaluate_ntp(model, eval_loader: DataLoader,
                 # Generate continuation (first 20 tokens)
                 max_gen = min(20, segment_ids.shape[1])
 
-                # For NTP, directly use prefix_embeds without question
+                # Get Qwen's embedding dtype for consistency
+                embed_layer = unwrapped.qwen.get_input_embeddings()
+                target_dtype = next(embed_layer.parameters()).dtype
+
+                # Align prefix_embeds dtype to match Qwen's embeddings
+                prefix_embeds = prefix_embeds.to(dtype=target_dtype)
+
                 # Create attention mask for prefix
                 prefix_len = prefix_embeds.shape[1]
                 prefix_mask = torch.ones(B, prefix_len, device=prefix_embeds.device)
