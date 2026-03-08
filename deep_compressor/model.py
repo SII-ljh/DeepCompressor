@@ -29,7 +29,7 @@ class DeepCompressor(nn.Module):
             self.qwen = qwen_model
         else:
             self.qwen = AutoModelForCausalLM.from_pretrained(
-                qcfg.model_name_or_path, torch_dtype=torch.bfloat16,
+                qcfg.model_name_or_path, dtype=torch.bfloat16,
             )
         for p in self.qwen.parameters():
             p.requires_grad = False
@@ -151,6 +151,9 @@ class DeepCompressor(nn.Module):
         embed_layer = self._get_qwen_embeddings()
         suffix_embeds = embed_layer(suffix_ids)  # (B, suffix_len, qwen_dim)
 
+        # Align prefix_embeds dtype with suffix_embeds to avoid mismatch
+        prefix_embeds = prefix_embeds.to(dtype=suffix_embeds.dtype)
+
         # Concatenate prefix and suffix embeddings
         inputs_embeds = torch.cat([prefix_embeds, suffix_embeds], dim=1)
 
@@ -195,6 +198,10 @@ class DeepCompressor(nn.Module):
         """
         embed_layer = self._get_qwen_embeddings()
         q_embeds = embed_layer(question_ids)  # (B, q_len, D)
+
+        # Align prefix_embeds dtype with q_embeds to avoid mismatch in generate()
+        # Use q_embeds dtype as reference (it comes from Qwen's embedding layer)
+        prefix_embeds = prefix_embeds.to(dtype=q_embeds.dtype)
         inputs_embeds = torch.cat([prefix_embeds, q_embeds], dim=1)
 
         B = prefix_embeds.shape[0]
