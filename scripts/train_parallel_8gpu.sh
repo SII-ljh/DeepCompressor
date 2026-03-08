@@ -57,41 +57,69 @@ if [ "$USE_TMUX" = true ]; then
     tmux new-session -d -s "$SESSION_NAME" -n "q16"
 
     # 窗口1: Q=16 (GPU 0-1)
+    echo "启动 Q=16 训练 (GPU 0-1)..."
     tmux send-keys -t "$SESSION_NAME:q16" "CUDA_VISIBLE_DEVICES=0,1 accelerate launch --multi_gpu --num_processes 2 -m deep_compressor.train --config configs/stage1_q16.yaml --data_path $DATA_PATH --stage 1 --wandb --wandb_project deep-compressor 2>&1 | tee logs/q16_$(date +%Y%m%d_%H%M%S).log" C-m
 
     # 窗口2: Q=32 (GPU 2-3)
+    echo "启动 Q=32 训练 (GPU 2-3)..."
     tmux new-window -t "$SESSION_NAME" -n "q32"
     tmux send-keys -t "$SESSION_NAME:q32" "CUDA_VISIBLE_DEVICES=2,3 accelerate launch --multi_gpu --num_processes 2 -m deep_compressor.train --config configs/stage1_q32.yaml --data_path $DATA_PATH --stage 1 --wandb --wandb_project deep-compressor 2>&1 | tee logs/q32_$(date +%Y%m%d_%H%M%S).log" C-m
 
     # 窗口3: Q=64 (GPU 4-5)
+    echo "启动 Q=64 训练 (GPU 4-5)..."
     tmux new-window -t "$SESSION_NAME" -n "q64"
     tmux send-keys -t "$SESSION_NAME:q64" "CUDA_VISIBLE_DEVICES=4,5 accelerate launch --multi_gpu --num_processes 2 -m deep_compressor.train --config configs/stage1_q64.yaml --data_path $DATA_PATH --stage 1 --wandb --wandb_project deep-compressor 2>&1 | tee logs/q64_$(date +%Y%m%d_%H%M%S).log" C-m
 
     # 窗口4: Q=128 (GPU 6)
+    echo "启动 Q=128 训练 (GPU 6)..."
     tmux new-window -t "$SESSION_NAME" -n "q128"
     tmux send-keys -t "$SESSION_NAME:q128" "CUDA_VISIBLE_DEVICES=6 python -m deep_compressor.train --config configs/stage1_q128.yaml --data_path $DATA_PATH --stage 1 --wandb --wandb_project deep-compressor 2>&1 | tee logs/q128_$(date +%Y%m%d_%H%M%S).log" C-m
 
     # 窗口5: Q=256 (GPU 7)
+    echo "启动 Q=256 训练 (GPU 7)..."
     tmux new-window -t "$SESSION_NAME" -n "q256"
     tmux send-keys -t "$SESSION_NAME:q256" "CUDA_VISIBLE_DEVICES=7 python -m deep_compressor.train --config configs/stage1_q256.yaml --data_path $DATA_PATH --stage 1 --wandb --wandb_project deep-compressor 2>&1 | tee logs/q256_$(date +%Y%m%d_%H%M%S).log" C-m
 
     echo ""
+    echo -e "${GREEN}等待训练进程启动...${NC}"
+    sleep 5
+
+    echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}所有训练任务已启动！${NC}"
+    echo -e "${GREEN}检查训练状态${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
-    echo "查看训练进度："
-    echo "  tmux attach -t $SESSION_NAME    # 进入tmux会话"
-    echo "  Ctrl+B 然后按数字键切换窗口"
-    echo "  Ctrl+B d 退出会话（训练继续）"
+
+    # 检查GPU使用情况
+    echo "GPU使用情况："
+    nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits | head -8
+
+    echo ""
+    echo "训练进程："
+    ps aux | grep "deep_compressor.train" | grep -v grep | wc -l | xargs -I {} echo "  找到 {} 个训练进程"
+
+    echo ""
+    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}查看训练进度的方法：${NC}"
+    echo -e "${YELLOW}========================================${NC}"
+    echo ""
+    echo "1. 进入tmux会话（推荐）："
+    echo "   tmux attach -t $SESSION_NAME"
+    echo "   按 Ctrl+B 然后按 0-4 切换窗口"
+    echo "   按 Ctrl+B d 退出（训练继续）"
+    echo ""
+    echo "2. 实时查看日志："
+    echo "   tail -f logs/q64_*.log"
+    echo ""
+    echo "3. 监控GPU："
+    echo "   watch -n 1 nvidia-smi"
+    echo ""
+    echo "4. 检查进程："
+    echo "   ps aux | grep deep_compressor.train"
     echo ""
     echo "停止所有训练："
-    echo "  tmux kill-session -t $SESSION_NAME"
+    echo "   tmux kill-session -t $SESSION_NAME"
     echo ""
-    echo "查看日志："
-    echo "  tail -f logs/q16_*.log"
-    echo "  tail -f logs/q32_*.log"
-    echo "  ..."
 
 else
     # 使用nohup后台运行
