@@ -38,14 +38,21 @@ def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
         print(f"Filtering to doc_tokens <= {max_doc_tokens}...\n")
 
     filtered = []
-    for i, item in enumerate(data):
-        if i % 1000 == 0 and i > 0:
-            print(f"  Processed {i:,}/{total:,}...", end="\r")
 
-        # Tokenize context
-        tokens = tokenizer(item["context"], truncation=False,
-                          return_tensors="pt", padding=False)
-        doc_len = tokens["input_ids"].shape[1]
+    import time
+    start_time = time.time()
+
+    for i, item in enumerate(data):
+        if i % 100 == 0 and i > 0:
+            elapsed = time.time() - start_time
+            rate = i / elapsed
+            eta = (total - i) / rate if rate > 0 else 0
+            print(f"  Processed {i:,}/{total:,} ({100*i/total:.1f}%)  "
+                  f"Rate: {rate:.0f} samples/s  ETA: {eta/60:.1f}min", end="\r")
+
+        # Tokenize context (no tensor creation for speed)
+        tokens = tokenizer.encode(item["context"], truncation=False)
+        doc_len = len(tokens)
 
         if min_doc_tokens <= doc_len <= max_doc_tokens:
             filtered.append(item)
@@ -57,7 +64,7 @@ def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
 
     print(f"Saving to {output_path}...")
     with open(output_path, "w") as f:
-        json.dump(filtered, f, ensure_ascii=False, indent=2)
+        json.dump(filtered, f, ensure_ascii=False)
 
     print(f"✓ Done! Saved {len(filtered):,} samples to {output_path}")
 
