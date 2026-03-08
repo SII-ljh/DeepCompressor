@@ -260,7 +260,7 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
                 accelerator: Accelerator,
                 max_new_tokens: int = 64,
                 show_samples: int = 5) -> Dict[str, float]:
-    """Evaluate QA model on dev set, returning Exact Match and F1.
+    """Evaluate QA model on dev set, returning Exact Match, F1, loss, and perplexity.
 
     Args:
         model: DeepCompressor (already wrapped by accelerator)
@@ -270,13 +270,14 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
         max_new_tokens: max tokens to generate per answer
         show_samples: number of sample predictions to display (0 = none)
     Returns:
-        {"exact_match": float, "f1": float}
+        {"exact_match": float, "f1": float, "loss": float, "perplexity": float}
     """
     model.eval()
     unwrapped = accelerator.unwrap_model(model)
 
     all_em = []
     all_f1 = []
+    all_loss = []  # Track loss per sample
     sample_outputs = []  # Store samples for display
 
     total_batches = len(eval_loader)
@@ -293,6 +294,19 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
         latent = unwrapped.compress(
             queries, byte_array, byte_mask=batch["doc_attention_mask"])
         prefix_embeds = unwrapped.up_mlp(latent)
+
+        # Compute loss (teacher-forcing with gold answers)
+        suffix_ids = torch.cat([batch["q_input_ids"], batch["answer_ids"]], dim=1)
+        suffix_mask = torch.cat([batch["q_attention_mask"],
+                                torch.ones_like(batch["answer_ids"])], dim=1)
+        q_len = batch["q_input_ids"].shape[1]
+        q_labels = torch.full_like(batch["q_input_ids"], -100)
+        full_labels = torch.cat([q_labels, batch["answer_labels"]], dim=1)
+
+        outputs = unwrapped.decode(
+            prefix_embeds, suffix_ids, suffix_mask, labels=full_labels)
+        batch_loss = outputs.loss.detach()
+        all_loss.append(batch_loss.item())
 
         # Generate answer tokens
         gen_ids = unwrapped.generate_answer(
@@ -326,18 +340,24 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
     # Gather across processes
     local_em = torch.tensor(all_em, device=accelerator.device) if all_em else torch.zeros(1, device=accelerator.device)
     local_f1 = torch.tensor(all_f1, device=accelerator.device) if all_f1 else torch.zeros(1, device=accelerator.device)
+    local_loss = torch.tensor(all_loss, device=accelerator.device) if all_loss else torch.zeros(1, device=accelerator.device)
     local_count = torch.tensor([float(len(all_em))], device=accelerator.device)
 
     gathered_count = accelerator.gather(local_count)
     total_count = gathered_count.sum().item()
 
     if total_count == 0:
-        return {"exact_match": 0.0, "f1": 0.0}
+        return {"exact_match": 0.0, "f1": 0.0, "loss": 0.0, "perplexity": float('inf')}
 
     local_em_sum = torch.tensor([sum(all_em)], device=accelerator.device)
     local_f1_sum = torch.tensor([sum(all_f1)], device=accelerator.device)
+    local_loss_sum = torch.tensor([sum(all_loss)], device=accelerator.device)
     gathered_em = accelerator.gather(local_em_sum).sum().item()
     gathered_f1 = accelerator.gather(local_f1_sum).sum().item()
+    gathered_loss = accelerator.gather(local_loss_sum).sum().item()
+
+    avg_loss = gathered_loss / max(len(all_loss), 1)
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
     # Display sample predictions (only on main process)
     if accelerator.is_main_process and sample_outputs:
@@ -358,4 +378,6 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
     return {
         "exact_match": gathered_em / total_count,
         "f1": gathered_f1 / total_count,
+        "loss": avg_loss,
+        "perplexity": perplexity,
     }

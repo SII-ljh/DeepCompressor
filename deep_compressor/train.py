@@ -260,6 +260,8 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                         if accelerator.is_main_process:
                             logger.info(
                                 f"[QA EVAL] step {completed_steps}  "
+                                f"loss={metrics['loss']:.4f}  "
+                                f"ppl={metrics['perplexity']:.2f}  "
                                 f"EM={metrics['exact_match']:.2%}  "
                                 f"F1={metrics['f1']:.4f}")
 
