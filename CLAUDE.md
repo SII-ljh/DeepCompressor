@@ -127,19 +127,47 @@ Each Q value saves to separate directory: `outputs/stage1_q{16,32,64,128,256}/ch
 
 ### Evaluation Output
 
-Produces comparison table with **direct_qwen baseline** (Qwen reading full document without compression) and CSV:
+Unified output with comprehensive metrics, **direct_qwen baseline**, and sample predictions for each model:
+
 ```
-Model                     | perplexity | loss    | Retention
-----------------------------------------------------------------
-Direct Qwen (baseline)    |    18.23   |  2.90   |     —
-Q=16                      |    45.68   |  3.82   |   76.0%
-Q=32                      |    32.12   |  3.47   |   83.7%
-Q=64                      |    24.57   |  3.20   |   90.7%
-Q=128                     |    20.99   |  3.04   |   95.4%
-Q=256                     |    19.46   |  2.97   |   97.8%
+====================================================================================================
+EVALUATION RESULTS - COMPARISON TABLE
+====================================================================================================
+Model                | perplexity     | loss           | token_accuracy | top5_accuracy  | Retention
+----------------------------------------------------------------------------------------------------
+Qwen (no compress)   |      18.234567 |       2.903456 |       0.456789 |       0.678901 |         —
+Q=16                 |      45.678901 |       3.821456 |       0.234567 |       0.456789 |     76.0%
+Q=32                 |      32.123456 |       3.469789 |       0.345678 |       0.567890 |     83.7%
+Q=64                 |      24.567890 |       3.201234 |       0.398765 |       0.612345 |     90.7%
+Q=128                |      20.987654 |       3.043210 |       0.432109 |       0.654321 |     95.4%
+Q=256                |      19.456789 |       2.967890 |       0.445678 |       0.667890 |     97.8%
+====================================================================================================
+
+Metric Explanations:
+  • perplexity: Lower is better (measures prediction uncertainty)
+  • loss: Lower is better (cross-entropy loss)
+  • token_accuracy: Higher is better (top-1 token prediction accuracy)
+  • top5_accuracy: Higher is better (correct token in top-5 predictions)
+  • Retention: Quality preserved after compression (100% = same as baseline)
+
+====================================================================================================
+SAMPLE PREDICTIONS
+====================================================================================================
+... (Shows sample predictions for each model with doc preview, prediction, and gold text) ...
 ```
 
-**Retention** = (baseline_loss / model_loss) × 100% — measures how much quality is preserved after compression.
+**Metrics:**
+- **Perplexity** - Prediction uncertainty (lower is better)
+- **Loss** - Cross-entropy loss (lower is better)
+- **Token Accuracy** - Top-1 token prediction accuracy (higher is better)
+- **Top-5 Accuracy** - Correct token in top-5 predictions (higher is better)
+- **Retention** - (baseline_loss / model_loss) × 100% — quality preserved after compression
+
+**Features:**
+- All models evaluated first, then unified output (no interleaved logs)
+- Each model shows sample predictions (doc preview + prediction + gold)
+- Direct comparison between baseline and compressed models
+- CSV export includes all metrics (see `docs/EVALUATION_IMPROVEMENTS.md`)
 
 ### Sample Display During Eval
 

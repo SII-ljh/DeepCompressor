@@ -212,25 +212,37 @@ def evaluate_qa_multi_ref(model, eval_loader: DataLoader, tokenizer,
 def evaluate_ntp(model, eval_loader: DataLoader,
                  accelerator: Accelerator,
                  tokenizer=None,
-                 show_sample: bool = True) -> Dict[str, float]:
-    """Evaluate NTP model on validation set, returning perplexity and loss.
+                 collect_samples: int = 3,
+                 max_gen_tokens: int = 50) -> Dict:
+    """Evaluate NTP model on validation set with comprehensive metrics.
 
     Args:
         model: DeepCompressor (already wrapped by accelerator)
         eval_loader: DataLoader for NTP validation data (already prepared)
         accelerator: Accelerator instance
-        tokenizer: Optional tokenizer for displaying sample predictions
-        show_sample: Whether to show a sample prediction
+        tokenizer: Optional tokenizer for generating sample predictions
+        collect_samples: Number of sample predictions to collect (0 = none)
+        max_gen_tokens: Maximum tokens to generate per sample
     Returns:
-        {"perplexity": float, "loss": float}
+        {
+            "perplexity": float,
+            "loss": float,
+            "token_accuracy": float,  # Top-1 token prediction accuracy
+            "top5_accuracy": float,   # Top-5 token prediction accuracy
+            "samples": [{"prediction": str, "gold": str, "doc_preview": str}, ...]
+        }
     """
     model.eval()
     unwrapped = accelerator.unwrap_model(model)
     total_loss = 0.0
     total_samples = 0
-    sample_shown = False
+    total_correct_tokens = 0
+    total_top5_correct = 0
+    total_tokens = 0
+    samples_collected = []
 
-    for batch in eval_loader:
+    for batch_idx, batch in enumerate(eval_loader):
+        # Compute loss and token accuracy
         losses = model(
             mode="ntp",
             doc_input_ids=batch["doc_input_ids"],
@@ -245,19 +257,59 @@ def evaluate_ntp(model, eval_loader: DataLoader,
         total_loss += loss_val * bs
         total_samples += bs
 
-        # Show one sample prediction (only on main process, only first batch)
-        if (show_sample and not sample_shown and tokenizer is not None
+        # Calculate token accuracy (only on main process to avoid duplicate counting)
+        if accelerator.is_main_process and tokenizer is not None:
+            # Get logits for accuracy calculation
+            doc_ids = batch["doc_input_ids"]
+            doc_mask = batch["doc_attention_mask"]
+            segment_ids = batch["segment_ids"]
+            segment_labels = batch["segment_labels"]
+
+            # Encode and compress
+            byte_array = unwrapped.encode_document(doc_ids, doc_mask)
+            B = doc_ids.shape[0]
+            zero_pooled = torch.zeros(B, unwrapped.config.qwen.hidden_size,
+                                     device=doc_ids.device)
+            queries = unwrapped.query_init(zero_pooled)
+            latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
+            prefix_embeds = unwrapped.up_mlp(latent)
+
+            # Get predictions
+            segment_mask = batch["segment_attention_mask"]
+            outputs = unwrapped.decode(prefix_embeds, segment_ids, segment_mask)
+            logits = outputs.logits  # (B, seq_len, vocab_size)
+
+            # Shift for next-token prediction
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = segment_labels[:, 1:].contiguous()
+
+            # Calculate accuracy (only on valid positions where label != -100)
+            valid_mask = (shift_labels != -100)
+            if valid_mask.any():
+                # Top-1 accuracy
+                predictions = shift_logits.argmax(dim=-1)
+                correct = (predictions == shift_labels) & valid_mask
+                total_correct_tokens += correct.sum().item()
+
+                # Top-5 accuracy
+                top5_preds = shift_logits.topk(5, dim=-1).indices  # (B, seq_len, 5)
+                shift_labels_expanded = shift_labels.unsqueeze(-1).expand_as(top5_preds)
+                top5_correct = ((top5_preds == shift_labels_expanded).any(dim=-1)) & valid_mask
+                total_top5_correct += top5_correct.sum().item()
+
+                total_tokens += valid_mask.sum().item()
+
+        # Collect sample predictions (only on main process, only first few batches)
+        if (tokenizer is not None and len(samples_collected) < collect_samples
                 and accelerator.is_main_process):
             try:
                 # Take first sample from batch
                 doc_ids = batch["doc_input_ids"][:1]
                 doc_mask = batch["doc_attention_mask"][:1]
                 segment_ids = batch["segment_ids"][:1]
-                segment_mask = batch["segment_attention_mask"][:1]
 
                 # Encode and compress
                 byte_array = unwrapped.encode_document(doc_ids, doc_mask)
-                # For NTP, use zero question vector → pure base queries
                 B = doc_ids.shape[0]
                 zero_pooled = torch.zeros(B, unwrapped.config.qwen.hidden_size,
                                          device=doc_ids.device)
@@ -265,49 +317,41 @@ def evaluate_ntp(model, eval_loader: DataLoader,
                 latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
                 prefix_embeds = unwrapped.up_mlp(latent)
 
-                # Generate continuation (first 20 tokens)
-                max_gen = min(20, segment_ids.shape[1])
-
-                # Use segment_ids[:1] as a dummy to get correct embedding dtype
-                # Then align prefix_embeds dtype (same as decode() method)
+                # Align dtype
                 embed_layer = unwrapped.qwen.get_input_embeddings()
-                dummy_embeds = embed_layer(segment_ids[:, :1])  # (1, 1, D)
+                dummy_embeds = embed_layer(segment_ids[:, :1])
                 prefix_embeds = prefix_embeds.to(dtype=dummy_embeds.dtype)
 
-                # Create attention mask for prefix
+                # Generate continuation
                 prefix_len = prefix_embeds.shape[1]
                 prefix_mask = torch.ones(B, prefix_len, device=prefix_embeds.device)
 
-                # Generate using only prefix embeddings
                 gen_ids = unwrapped.qwen.generate(
                     inputs_embeds=prefix_embeds,
                     attention_mask=prefix_mask,
-                    max_new_tokens=max_gen,
+                    max_new_tokens=max_gen_tokens,
                     do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                 )
 
-                # Decode (generate returns only new tokens when using inputs_embeds)
+                # Decode
                 pred_text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
-                gold_text = tokenizer.decode(segment_ids[0, :max_gen], skip_special_tokens=True)
+                gold_text = tokenizer.decode(segment_ids[0, :max_gen_tokens], skip_special_tokens=True)
+                doc_preview = tokenizer.decode(doc_ids[0, :50], skip_special_tokens=True)
 
-                print("\n" + "="*80)
-                print("  Sample NTP Prediction")
-                print("="*80)
-                print(f"Prediction: {pred_text[:200]}...")
-                print(f"Gold:       {gold_text[:200]}...")
-                print("="*80 + "\n")
-
-                sample_shown = True
+                samples_collected.append({
+                    "prediction": pred_text,
+                    "gold": gold_text,
+                    "doc_preview": doc_preview,
+                })
             except Exception as e:
-                print(f"Warning: Failed to show sample prediction: {e}")
+                pass  # Skip failed samples
 
     # Gather across processes
     stats = torch.tensor([total_loss, float(total_samples)],
                          device=accelerator.device)
     stats = accelerator.gather(stats)
-    # stats is (num_processes, 2) or (2,) — sum across all processes
     if stats.dim() > 1:
         stats = stats.sum(dim=0)
     gathered_loss = stats[0].item()
@@ -316,7 +360,17 @@ def evaluate_ntp(model, eval_loader: DataLoader,
     avg_loss = gathered_loss / max(gathered_samples, 1)
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
-    return {"perplexity": perplexity, "loss": avg_loss}
+    # Calculate accuracies
+    token_acc = total_correct_tokens / max(total_tokens, 1) if total_tokens > 0 else 0.0
+    top5_acc = total_top5_correct / max(total_tokens, 1) if total_tokens > 0 else 0.0
+
+    return {
+        "perplexity": perplexity,
+        "loss": avg_loss,
+        "token_accuracy": token_acc,
+        "top5_accuracy": top5_acc,
+        "samples": samples_collected,
+    }
 
 
 @torch.no_grad()
