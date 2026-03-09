@@ -78,7 +78,7 @@ def save_checkpoint(model, accelerator: Accelerator, output_dir: str, tag):
 def _build_forward_kwargs(batch, mode: str, completed_steps: int):
     """Build keyword arguments for model.forward() based on training mode."""
     if mode == "ntp":
-        return dict(
+        kwargs = dict(
             mode="ntp",
             doc_input_ids=batch["doc_input_ids"],
             doc_attention_mask=batch["doc_attention_mask"],
@@ -86,6 +86,12 @@ def _build_forward_kwargs(batch, mode: str, completed_steps: int):
             segment_attention_mask=batch["segment_attention_mask"],
             segment_labels=batch["segment_labels"],
         )
+        # Pass question if present in batch (question-guided NTP)
+        if "q_input_ids" in batch:
+            kwargs["q_input_ids"] = batch["q_input_ids"]
+            kwargs["q_attention_mask"] = batch["q_attention_mask"]
+        return kwargs
+
     # QA mode
     kwargs = dict(
         mode="qa",
@@ -416,7 +422,8 @@ def _run_training(config: DeepCompressorConfig,
     if tcfg.stage == 1:
         dataset = NTPDataset(data_path, tokenizer,
                              max_doc_tokens=config.qwen.max_doc_tokens,
-                             segment_len=tcfg.ntp_segment_len)
+                             segment_len=tcfg.ntp_segment_len,
+                             use_questions=config.ablation.ntp_use_questions)
 
         # Truncate training data if requested
         if max_train_samples > 0 and max_train_samples < len(dataset):

@@ -22,12 +22,13 @@ class NTPDataset(Dataset):
     """
 
     def __init__(self, data_path: str, tokenizer, max_doc_tokens: int = 8192,
-                 segment_len: int = 256, seed: int = 42):
+                 segment_len: int = 256, seed: int = 42, use_questions: bool = False):
         self.tokenizer = tokenizer
         self.max_doc_tokens = max_doc_tokens
         self.segment_len = segment_len
         self.rng = random.Random(seed)
         self.data_path = str(Path(data_path).resolve())
+        self.use_questions = use_questions
 
         # Build byte-offset index (one pass, no f.tell() per line)
         self.offsets: List[int] = []
@@ -61,7 +62,8 @@ class NTPDataset(Dataset):
         return len(self.offsets)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        text = json.loads(self._read_line(idx))["text"]
+        data = json.loads(self._read_line(idx))
+        text = data["text"]
         tokens = self.tokenizer(text, truncation=True,
                                 max_length=self.max_doc_tokens + self.segment_len,
                                 return_tensors="pt", padding=False)
@@ -81,11 +83,24 @@ class NTPDataset(Dataset):
         # Pass raw segment tokens as both input and labels.
         # HuggingFace ForCausalLMLoss handles the causal shift internally
         # (logits[i] predicts labels[i+1]).
-        return {
+        result = {
             "doc_input_ids": doc_ids,
             "segment_ids": seg_ids,
             "segment_labels": seg_ids.clone(),
         }
+
+        # Add question if available and enabled
+        if self.use_questions and "question" in data:
+            q_tokens = self.tokenizer(
+                data["question"],
+                truncation=True,
+                max_length=256,  # Max question length
+                return_tensors="pt",
+                padding=False
+            )
+            result["q_input_ids"] = q_tokens["input_ids"].squeeze(0)
+
+        return result
 
 
 class QADataset(Dataset):

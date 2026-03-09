@@ -103,6 +103,9 @@ class AblationConfig:
     # QueryInit: whether to condition on question
     query_condition_on_question: bool = True
 
+    # NTP: whether to use questions for guided compression (Stage 1)
+    ntp_use_questions: bool = False
+
     # Perceiver stage enables
     enable_stage_a: bool = True
     enable_stage_b: bool = True

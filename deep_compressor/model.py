@@ -224,22 +224,30 @@ class DeepCompressor(nn.Module):
 
     def forward_ntp(self, doc_input_ids: torch.Tensor, doc_attention_mask: torch.Tensor,
                     segment_ids: torch.Tensor, segment_attention_mask: torch.Tensor,
-                    segment_labels: torch.Tensor) -> Dict[str, torch.Tensor]:
+                    segment_labels: torch.Tensor,
+                    q_input_ids: Optional[torch.Tensor] = None,
+                    q_attention_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """NTP pretraining forward: compress doc → prefix → next-token prediction on segment.
 
         Args:
             doc_input_ids, doc_attention_mask: document tokens
             segment_ids, segment_attention_mask: continuation segment tokens
             segment_labels: target ids for NTP
+            q_input_ids: optional question tokens for guided compression
+            q_attention_mask: optional question attention mask
         Returns:
             dict with 'total' loss and 'ntp' loss
         """
         byte_array = self.encode_document(doc_input_ids, doc_attention_mask)
 
-        # For NTP, use zero question vector → pure base queries
-        B = doc_input_ids.shape[0]
-        zero_pooled = torch.zeros(B, self.config.qwen.hidden_size, device=doc_input_ids.device)
-        queries = self.query_init(zero_pooled)
+        # Use question if provided (guided compression), else zero vector (unguided)
+        if q_input_ids is not None and q_attention_mask is not None:
+            queries = self.encode_question(q_input_ids, q_attention_mask)
+        else:
+            # For NTP without questions, use zero question vector → pure base queries
+            B = doc_input_ids.shape[0]
+            zero_pooled = torch.zeros(B, self.config.qwen.hidden_size, device=doc_input_ids.device)
+            queries = self.query_init(zero_pooled)
 
         latent_array = self.compress(queries, byte_array, byte_mask=doc_attention_mask)
         prefix_embeds = self.up_mlp(latent_array)

@@ -83,6 +83,79 @@ python scripts/prepare_data.py --make-all-subsets # all subsets (tiny, dev, abla
 
 Downloads Qwen3-0.6B to `models/Qwen3-0.6B/` and builds NTP/QA datasets into `data/`. Key subsets: `ntp_tiny.jsonl` (50 samples), `qa_tiny_*.json` (50/20 samples), `ablation/` (5% of total data, stratified by source).
 
+## Pure QA Training (Skip Stage 1)
+
+**NEW - RECOMMENDED**: 直接在大规模QA数据集上训练，跳过Stage 1 NTP预训练。避免Stage 1的信息丢失问题。
+
+### Quick Start
+
+```bash
+# 1. 下载大规模QA数据集（~800K样本）
+python scripts/prepare_large_qa_data.py
+
+# 2. 过拟合实验（验证模型容量）
+python scripts/quick_overfit_qa.py
+
+# 3. 训练不同Q值的模型
+python scripts/train_qa_varying_q.py --use_large_data
+
+# 4. 评估对比
+python scripts/evaluate_all_checkpoints.py \
+    --eval_data data/qa_large_dev.json \
+    --stage 2 \
+    --output results/qa_results.csv
+```
+
+**数据集包括**: SQuAD v1+v2, TriviaQA, Natural Questions, HotpotQA, CMRC2018, DuReader, DRCD, WebQA
+
+**预期性能**:
+- Q=64: EM ~40-50%, F1 ~0.50-0.60
+- Q=128: EM ~50-60%, F1 ~0.60-0.70
+- Q=256: EM ~60-70%, F1 ~0.70-0.80
+
+**完整文档**: [`docs/QUICKSTART_QA_ONLY_TRAINING.md`](docs/QUICKSTART_QA_ONLY_TRAINING.md)
+
+## Question-Guided Compression (Stage 1 Refactoring)
+
+**ALTERNATIVE**: Train Stage 1 NTP with question context to learn task-aware compression. This addresses the fundamental misalignment where Stage 1 (trained with zero question vector) loses critical information that Stage 2 cannot recover.
+
+### Quick Start
+
+```bash
+# 1. Augment NTP data with questions
+python scripts/augment_ntp_with_questions.py \
+    --input data/ntp_train.jsonl \
+    --output data/ntp_train_guided.jsonl \
+    --qa_source data/qa_train.json
+
+# 2. Train with guided compression
+python -m deep_compressor.train \
+    --config configs/stage1_guided_q128.yaml \
+    --data_path data/ntp_train_guided.jsonl \
+    --stage 1
+
+# 3. Compare results
+python scripts/compare_guided_vs_unguided.py \
+    --unguided outputs/stage1_q128/checkpoint-final \
+    --guided outputs/stage1_guided_q128/checkpoint-final \
+    --eval_data data/ntp_train_512.jsonl \
+    --num_samples 50
+```
+
+**Expected improvements**:
+- NTP perplexity: 5-15% lower
+- Sample factual quality: 40-50% (vs 10-15% baseline)
+- Stage 2 EM/F1: +3-8 points
+
+**Key features**:
+- Backward compatible (all question params optional)
+- Three question generation strategies: QA sampling (70%), TF-IDF extraction (20%), generic templates (10%)
+- Config flag: `ablation.ntp_use_questions: true`
+
+**Documentation**:
+- Full guide: [`docs/QUESTION_GUIDED_COMPRESSION.md`](docs/QUESTION_GUIDED_COMPRESSION.md)
+- Quick reference: [`docs/QUICKSTART_GUIDED_COMPRESSION.md`](docs/QUICKSTART_GUIDED_COMPRESSION.md)
+
 ## Stage 1 Varying Query (Q) Experiments
 
 **NEW**: Automated workflow for training multiple Stage 1 models with different `num_queries` values to find the optimal compression ratio.
