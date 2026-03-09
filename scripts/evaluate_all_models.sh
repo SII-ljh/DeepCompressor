@@ -37,8 +37,8 @@ echo "开始评估..."
 echo "输出文件: ${OUTPUT_CSV}"
 echo ""
 
-# 运行评估
-python scripts/evaluate_all_checkpoints.py \
+# 运行评估 (设置 PYTHONPATH 确保模块可导入)
+PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}" python scripts/evaluate_all_checkpoints.py \
     --eval_data data/ntp_train.jsonl \
     --stage 1 \
     --show_samples 5 \

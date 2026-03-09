@@ -2,6 +2,12 @@
 # Shared functions for Phase 2 ablation launchers.
 # Sourced by run_phase2_fast.sh and run_phase2_full.sh.
 
+# 切换到项目根目录并设置 PYTHONPATH
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT" || exit 1
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+
 # ── Data paths (auto-detect ablation subset vs full data) ──
 if [[ -f data/ablation/ntp_ablation.jsonl ]]; then
     NTP_DATA=data/ablation/ntp_ablation.jsonl

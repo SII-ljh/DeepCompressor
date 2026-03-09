@@ -4,6 +4,14 @@
 
 set -e  # 遇到错误立即退出
 
+# 切换到项目根目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT" || exit 1
+
+# 设置 PYTHONPATH 确保模块可导入
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
