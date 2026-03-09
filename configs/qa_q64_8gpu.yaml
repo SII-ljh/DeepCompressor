@@ -1,6 +1,6 @@
 qwen:
   model_name_or_path: models/Qwen3-0.6B
-  max_doc_tokens: 512
+  max_doc_tokens: 4096
   max_question_tokens: 256
   max_answer_tokens: 512
 perceiver:
@@ -33,7 +33,7 @@ loss:
 training:
   stage: 2
   learning_rate: 0.0001
-  batch_size: 32
+  batch_size: 8
   gradient_accumulation_steps: 2
   max_steps: 50000
   warmup_steps: 2000

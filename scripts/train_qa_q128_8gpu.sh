@@ -35,8 +35,8 @@ fi
 
 # Training hyperparameters (optimized for 8 GPUs)
 BATCH_SIZE=24           # Per GPU batch size (optimized)
-GRAD_ACCUM=2           # Gradient accumulation steps
-# Effective batch size = 8 GPUs × 24 batch × 2 accum = 384
+GRAD_ACCUM=2           # Gradient accumulation           # Gradient accumulation steps
+# Effective batch size = 8 GPUs × 6 batch × 2 accum = 96
 MAX_STEPS=50000
 WARMUP_STEPS=2000
 LEARNING_RATE=1e-4
