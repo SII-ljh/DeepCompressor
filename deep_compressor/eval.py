@@ -277,10 +277,14 @@ def evaluate_ntp(model, eval_loader: DataLoader,
             # Get predictions
             segment_mask = batch["segment_attention_mask"]
             outputs = unwrapped.decode(prefix_embeds, segment_ids, segment_mask)
-            logits = outputs.logits  # (B, seq_len, vocab_size)
+            logits = outputs.logits  # (B, prefix_len + segment_len, vocab_size)
+
+            # Extract only the segment portion of logits
+            prefix_len = prefix_embeds.shape[1]
+            segment_logits = logits[:, prefix_len:, :]  # (B, segment_len, vocab_size)
 
             # Shift for next-token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
+            shift_logits = segment_logits[:, :-1, :].contiguous()
             shift_labels = segment_labels[:, 1:].contiguous()
 
             # Calculate accuracy (only on valid positions where label != -100)
