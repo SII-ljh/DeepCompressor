@@ -59,6 +59,9 @@ echo "Starting training..."
 echo ""
 
 # Run training with accelerate
+# Disable wandb (no internet on cluster)
+export WANDB_MODE=disabled
+
 accelerate launch \
     --multi_gpu \
     --num_processes 8 \
@@ -68,9 +71,9 @@ accelerate launch \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
     --stage 2 \
-    --wandb \
-    --wandb_project "$WANDB_PROJECT" \
-    --wandb_run_name "$WANDB_RUN_NAME" \
+    \
+    
+    
     2>&1 | tee "${OUTPUT_DIR}_training.log"
 
 EXIT_CODE=$?
