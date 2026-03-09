@@ -70,6 +70,8 @@ accelerate launch \
     --config configs/qa_q512_8gpu.yaml \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
+    --max_eval_samples 5000 
+
     --stage 2 \
     \
     
