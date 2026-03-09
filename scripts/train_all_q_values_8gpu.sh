@@ -1,19 +1,21 @@
 #!/bin/bash
 # Train all Q values sequentially with 8 GPUs
 # Runs Q=64, 128, 256, 512 one after another
+# All models trained for 2.5 epochs
 
 set -e  # Exit on error
 
 echo "========================================================================"
 echo "Deep Compressor - Train All Q Values (8 GPUs)"
 echo "========================================================================"
-echo "This script will train 4 models sequentially:"
-echo "  1. Q=64   (~5 hours)"
-echo "  2. Q=128  (~6 hours)"
-echo "  3. Q=256  (~7 hours)"
-echo "  4. Q=512  (~8 hours)"
+echo "This script will train 4 models sequentially (2.5 epochs each):"
+echo "  1. Q=64   ( 9,450 steps, ~2 hours)"
+echo "  2. Q=128  (12,600 steps, ~3 hours)"
+echo "  3. Q=256  (18,900 steps, ~4.5 hours)"
+echo "  4. Q=512  (37,800 steps, ~8 hours)"
 echo ""
-echo "Total estimated time: ~26 hours"
+echo "Total estimated time: ~17.5 hours"
+echo "All models will see the same amount of data (2.5 epochs)"
 echo "========================================================================"
 echo ""
 
@@ -33,7 +35,7 @@ echo ""
 
 # Train Q=64
 echo "========================================="
-echo "[1/4] Training Q=64..."
+echo "[1/4] Training Q=64 (9,450 steps)..."
 echo "========================================="
 bash "${SCRIPT_DIR}/train_qa_q64_8gpu.sh"
 if [ $? -ne 0 ]; then
@@ -45,7 +47,7 @@ echo ""
 
 # Train Q=128
 echo "========================================="
-echo "[2/4] Training Q=128..."
+echo "[2/4] Training Q=128 (12,600 steps)..."
 echo "========================================="
 bash "${SCRIPT_DIR}/train_qa_q128_8gpu.sh"
 if [ $? -ne 0 ]; then
@@ -57,7 +59,7 @@ echo ""
 
 # Train Q=256
 echo "========================================="
-echo "[3/4] Training Q=256..."
+echo "[3/4] Training Q=256 (18,900 steps)..."
 echo "========================================="
 bash "${SCRIPT_DIR}/train_qa_q256_8gpu.sh"
 if [ $? -ne 0 ]; then
@@ -69,7 +71,7 @@ echo ""
 
 # Train Q=512
 echo "========================================="
-echo "[4/4] Training Q=512..."
+echo "[4/4] Training Q=512 (37,800 steps)..."
 echo "========================================="
 bash "${SCRIPT_DIR}/train_qa_q512_8gpu.sh"
 if [ $? -ne 0 ]; then
@@ -82,6 +84,12 @@ echo ""
 echo "========================================================================"
 echo "✓ All training completed successfully!"
 echo "========================================================================"
+echo ""
+echo "Training Summary:"
+echo "  Q=64:  9,450 steps (2.5 epochs)"
+echo "  Q=128: 12,600 steps (2.5 epochs)"
+echo "  Q=256: 18,900 steps (2.5 epochs)"
+echo "  Q=512: 37,800 steps (2.5 epochs)"
 echo ""
 echo "Output directories:"
 echo "  - outputs/qa_q64_8gpu/"

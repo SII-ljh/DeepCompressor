@@ -37,11 +37,11 @@ fi
 BATCH_SIZE=16           # Per GPU batch size (optimized)
 GRAD_ACCUM=2           # Gradient accumulation           # Gradient accumulation steps
 # Effective batch size = 8 GPUs × 4 batch × 2 accum = 64
-MAX_STEPS=50000
-WARMUP_STEPS=2000
+MAX_STEPS=18900
+WARMUP_STEPS=945
 LEARNING_RATE=1e-4
-EVAL_EVERY=1000
-SAVE_EVERY=5000
+EVAL_EVERY=1890
+SAVE_EVERY=3780
 
 echo "Configuration:"
 echo "  Q value:              $Q_VALUE"
