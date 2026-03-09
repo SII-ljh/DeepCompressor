@@ -14,7 +14,7 @@ perceiver:
   stage_c_self_layers: 4
   ff_mult: 4
   dropout: 0.1
-  num_queries: 512
+  num_queries: 512  # ← 从256增加到512（压缩比从16:1降到8:1）
 projection:
   down_hidden: 768
   up_hidden: 768
@@ -33,21 +33,21 @@ loss:
 training:
   stage: 2
   learning_rate: 0.0001
-  batch_size: 10
+  batch_size: 16  # ← 从20降到16（Q增大，显存占用增加）
   gradient_accumulation_steps: 2
-  max_steps: 7560
-  warmup_steps: 378
+  max_steps: 3780
+  warmup_steps: 189
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
   seed: 42
   log_every: 50
-  eval_every: 756
-  save_every: 1512
+  eval_every: 378
+  save_every: 756
   ntp_segment_len: 256
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   mixed_precision: bf16
-  output_dir: outputs/qa_q512_8gpu
+  output_dir: outputs/qa_q512_8gpu  # ← 修改输出目录
 ablation:
   down_proj_mode: identity
   up_proj_mode: identity

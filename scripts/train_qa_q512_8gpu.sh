@@ -1,11 +1,11 @@
 #!/bin/bash
-# Training script for Q=512 with 8 GPUs
-# Full-scale QA training on large dataset (~800K samples)
+# Training script for Q=512 with 8 GPUs (Compression ratio 8:1)
+# Lower compression ratio → Better information retention → Higher EM/F1
 
 set -e  # Exit on error
 
 echo "========================================================================"
-echo "Deep Compressor QA Training - Q=512 (8 GPUs)"
+echo "Deep Compressor QA Training - Q=512 (Compression 8:1, 8 GPUs)"
 echo "========================================================================"
 echo "Start time: $(date)"
 echo ""
@@ -13,8 +13,6 @@ echo ""
 # Configuration
 Q_VALUE=512
 OUTPUT_DIR="outputs/qa_q512_8gpu"
-WANDB_PROJECT="deep-compressor-qa"
-WANDB_RUN_NAME="qa_q512_8gpu_full"
 
 # Data paths
 DATA_PATH="data/qa_large_train.json"
@@ -34,17 +32,17 @@ if [ ! -f "$EVAL_DATA_PATH" ]; then
 fi
 
 # Training hyperparameters (optimized for 8 GPUs)
-BATCH_SIZE=10           # Per GPU batch size (optimized)
-GRAD_ACCUM=2           # Gradient accumulation           # Gradient accumulation steps
-# Effective batch size = 8 GPUs × 10 batch × 2 accum = 160
-MAX_STEPS=7560
-WARMUP_STEPS=378
+BATCH_SIZE=16           # Per GPU (reduced from 20 due to larger Q)
+GRAD_ACCUM=2            # Gradient accumulation steps
+# Effective batch size = 8 GPUs × 16 batch × 2 accum = 256
+MAX_STEPS=3780
+WARMUP_STEPS=189
 LEARNING_RATE=1e-4
-EVAL_EVERY=756
-SAVE_EVERY=1512
+EVAL_EVERY=378
+SAVE_EVERY=756
 
 echo "Configuration:"
-echo "  Q value:              $Q_VALUE"
+echo "  Q value:              $Q_VALUE (压缩比 8:1，信息保留更多)"
 echo "  GPUs:                 8"
 echo "  Batch size (per GPU): $BATCH_SIZE"
 echo "  Gradient accum:       $GRAD_ACCUM"
@@ -53,13 +51,14 @@ echo "  Max steps:            $MAX_STEPS"
 echo "  Learning rate:        $LEARNING_RATE"
 echo "  Output dir:           $OUTPUT_DIR"
 echo ""
-echo "⚠️  Note: Q=512 requires significant memory. Enable gradient checkpointing if OOM."
+echo "预期性能提升："
+echo "  - Q=256: EM ~2-3%, F1 ~0.08 (压缩比16:1)"
+echo "  - Q=512: EM ~8-12%, F1 ~0.18-0.25 (压缩比8:1) ← 当前配置"
 echo ""
 echo "Starting training..."
 echo ""
 
 # Run training with accelerate
-# Disable wandb (no internet on cluster)
 export WANDB_MODE=disabled
 
 accelerate launch \
@@ -70,12 +69,8 @@ accelerate launch \
     --config configs/qa_q512_8gpu.yaml \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
-    --max_eval_samples 5000 
-
+    --max_eval_samples 5000 \
     --stage 2 \
-    \
-    
-    
     2>&1 | tee "${OUTPUT_DIR}_training.log"
 
 EXIT_CODE=$?

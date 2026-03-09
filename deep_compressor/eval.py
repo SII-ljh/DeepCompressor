@@ -478,7 +478,9 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
     gathered_f1 = accelerator.gather(local_f1_sum).sum().item()
     gathered_loss = accelerator.gather(local_loss_sum).sum().item()
 
-    avg_loss = gathered_loss / max(len(all_loss), 1)
+    # FIX: gathered_loss is sum across all processes, divide by total number of batches (not just local)
+    total_batches = len(all_loss) * accelerator.num_processes
+    avg_loss = gathered_loss / max(total_batches, 1)
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
     # Display sample predictions (only on main process)

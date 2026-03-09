@@ -217,6 +217,7 @@ class DeepCompressor(nn.Module):
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.2,  # Prevent repetitive generation
         )
         # With inputs_embeds, generate() returns ONLY generated tokens
         # (no input positions to strip), so return as-is.
