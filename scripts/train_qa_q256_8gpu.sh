@@ -34,14 +34,14 @@ if [ ! -f "$EVAL_DATA_PATH" ]; then
 fi
 
 # Training hyperparameters (optimized for 8 GPUs)
-BATCH_SIZE=16           # Per GPU batch size (optimized)
+BATCH_SIZE=20           # Per GPU batch size (optimized)
 GRAD_ACCUM=2           # Gradient accumulation           # Gradient accumulation steps
-# Effective batch size = 8 GPUs × 4 batch × 2 accum = 64
-MAX_STEPS=18900
-WARMUP_STEPS=945
+# Effective batch size = 8 GPUs × 20 batch × 2 accum = 320
+MAX_STEPS=3780
+WARMUP_STEPS=189
 LEARNING_RATE=1e-4
-EVAL_EVERY=1890
-SAVE_EVERY=3780
+EVAL_EVERY=378
+SAVE_EVERY=756
 
 echo "Configuration:"
 echo "  Q value:              $Q_VALUE"

@@ -33,17 +33,17 @@ loss:
 training:
   stage: 2
   learning_rate: 0.0001
-  batch_size: 2
+  batch_size: 10
   gradient_accumulation_steps: 2
-  max_steps: 37800
-  warmup_steps: 1890
+  max_steps: 7560
+  warmup_steps: 378
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
   seed: 42
   log_every: 50
-  eval_every: 3780
-  save_every: 7560
+  eval_every: 756
+  save_every: 1512
   ntp_segment_len: 256
   gradient_checkpointing: true
   mixed_precision: bf16
