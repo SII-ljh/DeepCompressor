@@ -152,6 +152,7 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
     running_components = {}  # accumulate per-component losses
     micro_steps = 0
     last_metrics = None
+    best_metric = float("inf")  # track best eval loss for saving best checkpoint
 
     while completed_steps < tcfg.max_steps:
         for batch in train_loader:
@@ -280,6 +281,19 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                         )
 
                     last_metrics = metrics
+
+                    # Save best checkpoint (by eval loss)
+                    eval_loss = metrics.get("loss", float("inf"))
+                    if eval_loss < best_metric:
+                        best_metric = eval_loss
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            save_checkpoint(model, accelerator,
+                                            tcfg.output_dir, "best")
+                            logger.info(
+                                f"New best eval loss: {eval_loss:.4f} "
+                                f"at step {completed_steps}")
+
                     model.train()
 
                     # Diagnostic callback (mid-training diagnostics)

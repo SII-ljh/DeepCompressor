@@ -1,11 +1,10 @@
 #!/bin/bash
-# Training script for Q=128 with 8 GPUs
-# Full-scale QA training on large dataset (~800K samples)
+# Training script for Q=128 with 8 GPUs (Compression ratio 32:1, 3 epochs)
 
 set -e  # Exit on error
 
 echo "========================================================================"
-echo "Deep Compressor QA Training - Q=128 (8 GPUs)"
+echo "Deep Compressor QA Training - Q=128 (Compression 32:1, 8 GPUs, 3 epochs)"
 echo "========================================================================"
 echo "Start time: $(date)"
 echo ""
@@ -13,8 +12,6 @@ echo ""
 # Configuration
 Q_VALUE=128
 OUTPUT_DIR="outputs/qa_q128_8gpu"
-WANDB_PROJECT="deep-compressor-qa"
-WANDB_RUN_NAME="qa_q128_8gpu_full"
 
 # Data paths
 DATA_PATH="data/qa_large_train.json"
@@ -34,22 +31,23 @@ if [ ! -f "$EVAL_DATA_PATH" ]; then
 fi
 
 # Training hyperparameters (optimized for 8 GPUs)
-BATCH_SIZE=30           # Per GPU batch size (optimized)
-GRAD_ACCUM=2           # Gradient accumulation           # Gradient accumulation steps
+BATCH_SIZE=30           # Per GPU batch size
+GRAD_ACCUM=2            # Gradient accumulation steps
 # Effective batch size = 8 GPUs × 30 batch × 2 accum = 480
-MAX_STEPS=2520
-WARMUP_STEPS=126
+# steps/epoch = 484K / 480 ≈ 1008, 3 epochs = 3024
+MAX_STEPS=3024
+WARMUP_STEPS=151
 LEARNING_RATE=1e-4
 EVAL_EVERY=252
-SAVE_EVERY=504
+SAVE_EVERY=1008
 
 echo "Configuration:"
-echo "  Q value:              $Q_VALUE"
+echo "  Q value:              $Q_VALUE (压缩比 32:1)"
 echo "  GPUs:                 8"
 echo "  Batch size (per GPU): $BATCH_SIZE"
 echo "  Gradient accum:       $GRAD_ACCUM"
 echo "  Effective batch:      $((8 * BATCH_SIZE * GRAD_ACCUM))"
-echo "  Max steps:            $MAX_STEPS"
+echo "  Max steps:            $MAX_STEPS (3 epochs)"
 echo "  Learning rate:        $LEARNING_RATE"
 echo "  Output dir:           $OUTPUT_DIR"
 echo ""
@@ -57,7 +55,6 @@ echo "Starting training..."
 echo ""
 
 # Run training with accelerate
-# Disable wandb (no internet on cluster)
 export WANDB_MODE=disabled
 
 accelerate launch \
@@ -68,12 +65,8 @@ accelerate launch \
     --config configs/qa_q128_8gpu.yaml \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
-    --max_eval_samples 5000 
-
+    --max_eval_samples 5000 \
     --stage 2 \
-    \
-    
-    
     2>&1 | tee "${OUTPUT_DIR}_training.log"
 
 EXIT_CODE=$?

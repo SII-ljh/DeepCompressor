@@ -35,15 +35,15 @@ training:
   learning_rate: 0.0001
   batch_size: 40
   gradient_accumulation_steps: 2
-  max_steps: 1890
-  warmup_steps: 95
+  max_steps: 2268
+  warmup_steps: 113
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
   seed: 42
   log_every: 50
   eval_every: 189
-  save_every: 500
+  save_every: 756
   ntp_segment_len: 256
   gradient_checkpointing: false
   mixed_precision: bf16
