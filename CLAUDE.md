@@ -127,16 +127,19 @@ Each Q value saves to separate directory: `outputs/stage1_q{16,32,64,128,256}/ch
 
 ### Evaluation Output
 
-Produces comparison table and CSV:
+Produces comparison table with **direct_qwen baseline** (Qwen reading full document without compression) and CSV:
 ```
-Q      | perplexity | loss
---------------------------------
-16     |    28.45   |  3.35
-32     |    25.12   |  3.22
-64     |    23.57   |  3.16
-128    |    22.89   |  3.13
-256    |    22.35   |  3.11
+Model                     | perplexity | loss    | Retention
+----------------------------------------------------------------
+Direct Qwen (baseline)    |    18.23   |  2.90   |     —
+Q=16                      |    45.68   |  3.82   |   76.0%
+Q=32                      |    32.12   |  3.47   |   83.7%
+Q=64                      |    24.57   |  3.20   |   90.7%
+Q=128                     |    20.99   |  3.04   |   95.4%
+Q=256                     |    19.46   |  2.97   |   97.8%
 ```
+
+**Retention** = (baseline_loss / model_loss) × 100% — measures how much quality is preserved after compression.
 
 ### Sample Display During Eval
 
