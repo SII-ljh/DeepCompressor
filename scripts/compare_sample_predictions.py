@@ -1,10 +1,13 @@
-"""Compare sample predictions across different Q values.
+"""Compare sample predictions across different Q values with Qwen baseline.
 
-Shows how the same samples are predicted by models with different Q values,
-making it easy to see the impact of compression ratio on generation quality.
+Shows how the same samples are predicted by:
+1. Qwen-0.6B reading full document directly (baseline)
+2. Models with different Q values (compressed)
+
+This makes it easy to see the impact of compression ratio on generation quality.
 
 Usage:
-    # Compare predictions on 3 samples
+    # Compare predictions on 3 samples (includes Qwen baseline)
     python scripts/compare_sample_predictions.py \
         --eval_data data/ntp_train.jsonl \
         --num_samples 3
@@ -14,6 +17,12 @@ Usage:
         --eval_data data/qa_dev.json \
         --stage 2 \
         --num_samples 5
+
+    # Skip baseline for faster evaluation
+    python scripts/compare_sample_predictions.py \
+        --eval_data data/ntp_train.jsonl \
+        --num_samples 3 \
+        --no_baseline
 """
 
 import argparse
@@ -29,6 +38,8 @@ from transformers import AutoTokenizer
 from deep_compressor.config import DeepCompressorConfig
 from deep_compressor.data import NTPDataset, PaddingCollator, QADataset
 from deep_compressor.model import DeepCompressor
+
+from transformers import AutoModelForCausalLM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,6 +169,77 @@ def predict_qa_samples(model, samples, tokenizer, device, max_new_tokens=64):
     return predictions
 
 
+@torch.no_grad()
+def predict_qwen_baseline_ntp(qwen_model, samples, tokenizer, device, max_gen=50):
+    """Generate predictions using Qwen baseline (reading full document)."""
+    predictions = []
+
+    for sample in samples:
+        doc_ids = sample["doc_input_ids"].unsqueeze(0).to(device)
+        doc_mask = sample["doc_attention_mask"].unsqueeze(0).to(device)
+        segment_ids = sample["segment_ids"].unsqueeze(0).to(device)
+
+        # Qwen reads full document directly
+        gen_ids = qwen_model.generate(
+            input_ids=doc_ids,
+            attention_mask=doc_mask,
+            max_new_tokens=min(max_gen, segment_ids.shape[1]),
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        # Extract only generated tokens (strip input)
+        gen_tokens = gen_ids[0, doc_ids.shape[1]:]
+        pred_text = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+        gold_text = tokenizer.decode(segment_ids[0, :max_gen], skip_special_tokens=True)
+
+        predictions.append({
+            "prediction": pred_text,
+            "gold": gold_text,
+        })
+
+    return predictions
+
+
+@torch.no_grad()
+def predict_qwen_baseline_qa(qwen_model, samples, tokenizer, device, max_new_tokens=64):
+    """Generate predictions using Qwen baseline (reading full document + question)."""
+    predictions = []
+
+    for sample in samples:
+        doc_ids = sample["doc_input_ids"].unsqueeze(0).to(device)
+        doc_mask = sample["doc_attention_mask"].unsqueeze(0).to(device)
+        q_ids = sample["q_input_ids"].unsqueeze(0).to(device)
+        q_mask = sample["q_attention_mask"].unsqueeze(0).to(device)
+
+        # Concatenate document + question
+        input_ids = torch.cat([doc_ids, q_ids], dim=1)
+        attention_mask = torch.cat([doc_mask, q_mask], dim=1)
+
+        # Generate answer
+        gen_ids = qwen_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        # Extract only generated tokens
+        gen_tokens = gen_ids[0, input_ids.shape[1]:]
+        pred_text = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+        predictions.append({
+            "question": sample.get("question_text", ""),
+            "prediction": pred_text,
+            "gold": sample["answer_text"],
+        })
+
+    return predictions
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compare sample predictions across different Q values")
@@ -169,6 +251,8 @@ def main():
                         help="Number of samples to compare")
     parser.add_argument("--max_gen_tokens", type=int, default=50,
                         help="Max tokens to generate per sample")
+    parser.add_argument("--no_baseline", action="store_true",
+                        help="Skip Qwen baseline comparison")
     args = parser.parse_args()
 
     # Find all checkpoints
@@ -223,6 +307,33 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
+    # Load Qwen baseline model (optional)
+    baseline_predictions = None
+    if not args.no_baseline:
+        logger.info("\nLoading Qwen baseline model (reading full document)...")
+        qwen_baseline = AutoModelForCausalLM.from_pretrained(
+            "models/Qwen3-0.6B",
+            torch_dtype=torch.bfloat16,
+            device_map=device,
+            trust_remote_code=True
+        )
+        qwen_baseline.eval()
+
+        logger.info("Generating Qwen baseline predictions...")
+        if args.stage == 1:
+            baseline_predictions = predict_qwen_baseline_ntp(
+                qwen_baseline, samples, tokenizer, device, max_gen=args.max_gen_tokens
+            )
+        else:
+            baseline_predictions = predict_qwen_baseline_qa(
+                qwen_baseline, samples, tokenizer, device, max_new_tokens=args.max_gen_tokens
+            )
+
+        # Free memory
+        del qwen_baseline
+        torch.cuda.empty_cache()
+        logger.info("Baseline predictions complete\n")
+
     # Evaluate each checkpoint on the same samples
     all_predictions = {}
 
@@ -258,7 +369,7 @@ def main():
 
     # Display comparison
     print("\n" + "="*100)
-    print("  Sample Prediction Comparison Across Different Q Values")
+    print("  Sample Prediction Comparison: Qwen Baseline vs Compressed Models")
     print("="*100 + "\n")
 
     for sample_idx in range(len(samples)):
@@ -274,9 +385,19 @@ def main():
         gold = all_predictions[list(all_predictions.keys())[0]][sample_idx]["gold"]
         print(f"  {gold}\n")
 
+        # Show Qwen baseline first (if available)
+        if baseline_predictions:
+            baseline_pred = baseline_predictions[sample_idx]["prediction"]
+            print(f"【Qwen-0.6B Baseline (Full Document)】:")
+            print(f"  {baseline_pred}")
+            print()
+            print("-"*100)
+            print()
+
+        # Show compressed models
         for q_value in sorted(all_predictions.keys()):
             pred = all_predictions[q_value][sample_idx]["prediction"]
-            print(f"【Q={q_value:3d} Prediction】:")
+            print(f"【Q={q_value:3d} Compressed】:")
             print(f"  {pred}")
             print()
 
