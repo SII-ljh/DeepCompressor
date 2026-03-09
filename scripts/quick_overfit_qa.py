@@ -224,6 +224,39 @@ def quick_overfit_test(
     logger.info("=" * 70)
 
 
+def create_synthetic_qa_data(num_samples: int = 10):
+    """Create synthetic QA data for testing without downloading datasets."""
+    import tempfile
+
+    # Generate synthetic QA samples
+    samples = []
+    for i in range(num_samples):
+        context = f"This is a sample financial document number {i}. " \
+                  f"The company reported revenue of ${100 + i*10} million in Q{i%4 + 1}. " \
+                  f"The CEO is John Smith and the CFO is Jane Doe. " \
+                  f"The company operates in the technology sector with {50 + i*5} employees. " \
+                  f"Their main product is Software Solution {i} which generated ${20 + i*2} million."
+
+        question = f"What was the revenue in Q{i%4 + 1}?"
+        answer = f"${100 + i*10} million"
+
+        samples.append({
+            "context": context,
+            "question": question,
+            "answer": answer,
+        })
+
+    # Save to temporary file
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+    json.dump(samples, temp_file, ensure_ascii=False)
+    temp_file.close()
+
+    logger.info(f"✓ Created synthetic data: {temp_file.name}")
+    logger.info(f"  {len(samples)} samples generated")
+
+    return temp_file.name
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quick QA overfitting test")
     parser.add_argument(
@@ -237,6 +270,11 @@ def main():
         type=str,
         default=None,
         help="QA data path (default: data/qa_tiny_train.json if exists, else data/qa_train.json)",
+    )
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Use synthetic data (no download required)",
     )
     parser.add_argument(
         "--samples", type=int, default=10, help="Number of samples to overfit"
@@ -253,8 +291,12 @@ def main():
 
     args = parser.parse_args()
 
+    # Use synthetic data if requested
+    if args.synthetic:
+        logger.info("Using synthetic data (no download required)")
+        args.data = create_synthetic_qa_data(num_samples=args.samples)
     # Auto-detect data path
-    if args.data is None:
+    elif args.data is None:
         tiny_path = DATA_DIR / "qa_tiny_train.json"
         full_path = DATA_DIR / "qa_train.json"
         large_path = DATA_DIR / "qa_large_train.json"
@@ -266,7 +308,21 @@ def main():
         elif full_path.exists():
             args.data = str(full_path)
         else:
-            logger.error("No QA data found. Please run prepare_data.py first.")
+            logger.error("=" * 70)
+            logger.error("ERROR: No QA data found!")
+            logger.error("=" * 70)
+            logger.error("")
+            logger.error("Please choose one of the following options:")
+            logger.error("")
+            logger.error("Option 1 (FASTEST): Use synthetic data (no download)")
+            logger.error("  python scripts/quick_overfit_qa.py --synthetic")
+            logger.error("")
+            logger.error("Option 2: Download small test dataset (~10K samples, ~5 min)")
+            logger.error("  python scripts/prepare_large_qa_data.py --test")
+            logger.error("")
+            logger.error("Option 3: Download large dataset (~800K samples, ~1-2 hours)")
+            logger.error("  python scripts/prepare_large_qa_data.py")
+            logger.error("")
             return
 
     quick_overfit_test(
