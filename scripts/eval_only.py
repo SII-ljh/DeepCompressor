@@ -11,6 +11,10 @@ Usage:
 import argparse
 import logging
 import os
+import sys
+
+# Add project root to path so `deep_compressor` is importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 from accelerate import Accelerator
