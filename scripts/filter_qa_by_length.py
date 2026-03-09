@@ -1,126 +1,120 @@
 #!/usr/bin/env python3
 """Filter QA dataset by document length.
 
-Creates filtered versions of qa_train.json and qa_dev.json containing only
-samples with doc_len <= max_doc_tokens.
+Keeps only samples where context length <= max_length.
 
 Usage:
-  python scripts/filter_qa_by_length.py --max_tokens 512
-  python scripts/filter_qa_by_length.py --max_tokens 2048
+    python scripts/filter_qa_by_length.py \
+        --input data/qa_large_train.json \
+        --output data/qa_large_train_512.json \
+        --max_length 512
 """
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from transformers import AutoTokenizer
-
+# Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from transformers import AutoTokenizer
+    HAS_TOKENIZER = True
+except ImportError:
+    HAS_TOKENIZER = False
+    print("Warning: transformers not installed, using character count")
 
 
-def filter_qa_data(input_path: str, output_path: str, tokenizer_path: str,
-                   min_doc_tokens: int, max_doc_tokens: int):
-    """Filter QA dataset to only include samples with min_doc_tokens <= doc_len <= max_doc_tokens."""
+def filter_dataset(input_path: str, output_path: str, max_length: int,
+                   tokenizer=None):
+    """Filter dataset by context length."""
+    print(f"Loading dataset from {input_path}...")
 
-    print(f"Loading tokenizer from {tokenizer_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
-    print(f"Loading QA data from {input_path}...")
-    with open(input_path) as f:
+    with open(input_path, 'r') as f:
         data = json.load(f)
 
-    total = len(data)
-    print(f"Total samples: {total:,}")
-    if min_doc_tokens > 0:
-        print(f"Filtering to {min_doc_tokens} <= doc_tokens <= {max_doc_tokens}...\n")
-    else:
-        print(f"Filtering to doc_tokens <= {max_doc_tokens}...\n")
+    print(f"✓ Loaded {len(data):,} samples")
+    print(f"  Filtering: context <= {max_length} {('tokens' if tokenizer else 'characters')}")
+    print()
 
+    # Filter samples
     filtered = []
+    length_distribution = []
 
-    import time
-    start_time = time.time()
+    for i, sample in enumerate(data):
+        if (i + 1) % 10000 == 0:
+            print(f"  Processed {i+1:,}/{len(data):,}...")
 
-    for i, item in enumerate(data):
-        if i % 100 == 0 and i > 0:
-            elapsed = time.time() - start_time
-            rate = i / elapsed
-            eta = (total - i) / rate if rate > 0 else 0
-            print(f"  Processed {i:,}/{total:,} ({100*i/total:.1f}%)  "
-                  f"Rate: {rate:.0f} samples/s  ETA: {eta/60:.1f}min", end="\r")
+        context = sample.get('context', '')
 
-        # Tokenize context (no tensor creation for speed)
-        tokens = tokenizer.encode(item["context"], truncation=False)
-        doc_len = len(tokens)
+        # Calculate length
+        if tokenizer:
+            ctx_len = len(tokenizer.encode(context, add_special_tokens=False))
+        else:
+            ctx_len = len(context)
 
-        if min_doc_tokens <= doc_len <= max_doc_tokens:
-            filtered.append(item)
+        length_distribution.append(ctx_len)
 
-    print(f"\n\nFiltered results:")
-    print(f"  Input:  {total:,} samples")
-    print(f"  Output: {len(filtered):,} samples ({100*len(filtered)/total:.1f}%)")
-    print(f"  Dropped: {total - len(filtered):,} samples\n")
+        if ctx_len <= max_length:
+            filtered.append(sample)
 
-    print(f"Saving to {output_path}...")
-    with open(output_path, "w") as f:
+    print(f"✓ Filtered {len(filtered):,}/{len(data):,} samples "
+          f"({100*len(filtered)/len(data):.1f}% kept)")
+    print()
+
+    # Statistics
+    import numpy as np
+    lengths = np.array(length_distribution)
+
+    print("Length statistics (before filtering):")
+    print(f"  Min:    {lengths.min():,}")
+    print(f"  Median: {int(np.median(lengths)):,}")
+    print(f"  Mean:   {int(lengths.mean()):,}")
+    print(f"  95th:   {int(np.percentile(lengths, 95)):,}")
+    print(f"  Max:    {lengths.max():,}")
+    print()
+
+    print(f"Samples > {max_length}: {(lengths > max_length).sum():,} "
+          f"({100*(lengths > max_length).sum()/len(lengths):.1f}% discarded)")
+    print()
+
+    # Save filtered data
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, 'w') as f:
         json.dump(filtered, f, ensure_ascii=False)
 
-    print(f"✓ Done! Saved {len(filtered):,} samples to {output_path}")
+    print(f"✓ Saved {len(filtered):,} samples to {output_path}")
+    print(f"  File size: {output_path.stat().st_size / 1e6:.1f} MB")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Filter QA dataset by document length"
+        description="Filter QA dataset by context length"
     )
-    parser.add_argument(
-        "--min_tokens", type=int, default=0,
-        help="Minimum document tokens (default: 0)"
-    )
-    parser.add_argument(
-        "--max_tokens", type=int, default=512,
-        help="Maximum document tokens (default: 512)"
-    )
-    parser.add_argument(
-        "--tokenizer", type=str, default="models/Qwen3-0.6B",
-        help="Tokenizer path (default: models/Qwen3-0.6B)"
-    )
-    parser.add_argument(
-        "--input_train", type=str, default=str(DATA_DIR / "qa_train.json"),
-        help="Input QA train file"
-    )
-    parser.add_argument(
-        "--input_dev", type=str, default=str(DATA_DIR / "qa_dev.json"),
-        help="Input QA dev file"
-    )
+    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--tokenizer", type=str, default="models/Qwen3-0.6B")
+
     args = parser.parse_args()
 
-    # Generate output filename
-    if args.min_tokens > 0:
-        suffix = f"{args.min_tokens}_{args.max_tokens}"
-    else:
-        suffix = f"{args.max_tokens}"
+    # Load tokenizer
+    tokenizer = None
+    if HAS_TOKENIZER:
+        try:
+            print(f"Loading tokenizer from {args.tokenizer}...")
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.tokenizer, trust_remote_code=True)
+            print("✓ Tokenizer loaded\n")
+        except Exception as e:
+            print(f"Warning: {e}\nUsing character count\n")
 
-    # Filter train
-    output_train = DATA_DIR / f"qa_train_filtered_{suffix}.json"
-    filter_qa_data(args.input_train, str(output_train),
-                   args.tokenizer, args.min_tokens, args.max_tokens)
-
-    print("\n" + "=" * 70 + "\n")
-
-    # Filter dev (usually already short, but filter anyway for consistency)
-    output_dev = DATA_DIR / f"qa_dev_filtered_{suffix}.json"
-    filter_qa_data(args.input_dev, str(output_dev),
-                   args.tokenizer, args.min_tokens, args.max_tokens)
-
-    print("\n" + "=" * 70)
-    print("Summary:")
-    print(f"  Train: {output_train}")
-    print(f"  Dev:   {output_dev}")
-    if args.min_tokens > 0:
-        print(f"\nUse these files for training with {args.min_tokens} <= doc_tokens <= {args.max_tokens}")
-    else:
-        print(f"\nUse these files for training with doc_tokens <= {args.max_tokens}")
+    filter_dataset(args.input, args.output, args.max_length, tokenizer)
 
 
 if __name__ == "__main__":
