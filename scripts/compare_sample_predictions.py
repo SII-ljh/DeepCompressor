@@ -27,8 +27,14 @@ Usage:
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, List
+
+# Add project root to Python path
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
 
 import torch
 from accelerate import Accelerator
