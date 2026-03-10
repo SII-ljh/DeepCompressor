@@ -43,7 +43,7 @@ sys.path.insert(0, str(project_root))
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Subset
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from deep_compressor.config import DeepCompressorConfig
 from deep_compressor.data import PaddingCollator, QADataset
@@ -268,6 +268,127 @@ def evaluate_qa_detailed(
     return metrics, samples
 
 
+# ── Baseline (raw Qwen) evaluation ───────────────────────────────────────────
+
+
+def discover_baseline_models(models_dir: str = "models") -> List[Tuple[str, str]]:
+    """Return list of (model_path, display_name) for raw models under models/."""
+    base = Path(models_dir)
+    if not base.exists():
+        return []
+    found = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir():
+            continue
+        # Check it looks like a HF model dir
+        if (d / "config.json").exists():
+            found.append((str(d), d.name))
+    return found
+
+
+@torch.no_grad()
+def evaluate_baseline_qa(
+    qwen_model, eval_loader: DataLoader, tokenizer,
+    accelerator: Accelerator, max_new_tokens: int = 64,
+    source_label: str = "dev",
+) -> Tuple[Dict[str, float], List[SampleResult]]:
+    """Evaluate raw Qwen (no compression) on QA as upper bound.
+
+    Feeds full [doc_tokens | question_tokens] as input, generates answer.
+    """
+    qwen_model.eval()
+    unwrapped = accelerator.unwrap_model(qwen_model)
+
+    all_em, all_f1, all_rouge, all_loss = [], [], [], []
+    samples = []
+    empty_count = 0
+    global_idx = 0
+
+    total_batches = len(eval_loader)
+    for batch_idx, batch in enumerate(eval_loader):
+        if accelerator.is_main_process and batch_idx % 20 == 0:
+            pct = 100 * batch_idx / max(total_batches, 1)
+            print(f"\r  [{source_label}] batch {batch_idx}/{total_batches} "
+                  f"({pct:.0f}%)", end="", flush=True)
+
+        doc_ids = batch["doc_input_ids"]
+        doc_mask = batch["doc_attention_mask"]
+        q_ids = batch["q_input_ids"]
+        q_mask = batch["q_attention_mask"]
+        ans_ids = batch["answer_ids"]
+        ans_labels = batch["answer_labels"]
+
+        # Concatenate: [doc | question | answer] for teacher-forcing loss
+        input_ids = torch.cat([doc_ids, q_ids, ans_ids], dim=1)
+        attn_mask = torch.cat([doc_mask, q_mask,
+                               torch.ones_like(ans_ids)], dim=1)
+        # Labels: -100 for doc+question, real labels for answer
+        ignore_doc = torch.full_like(doc_ids, -100)
+        ignore_q = torch.full_like(q_ids, -100)
+        labels = torch.cat([ignore_doc, ignore_q, ans_labels], dim=1)
+
+        outputs = unwrapped(
+            input_ids=input_ids, attention_mask=attn_mask,
+            labels=labels, use_cache=False,
+        )
+        batch_loss = outputs.loss.detach().item()
+
+        # Generate: feed [doc | question], generate answer
+        gen_input = torch.cat([doc_ids, q_ids], dim=1)
+        gen_mask = torch.cat([doc_mask, q_mask], dim=1)
+        gen_out = unwrapped.generate(
+            input_ids=gen_input, attention_mask=gen_mask,
+            max_new_tokens=max_new_tokens, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.2,
+        )
+        # Strip input prefix from generated output
+        gen_only = gen_out[:, gen_input.shape[1]:]
+        preds = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
+
+        golds = batch["answer_text"]
+        questions = batch.get("question_text", [""] * len(preds))
+        doc_previews = tokenizer.batch_decode(
+            doc_ids[:, :120], skip_special_tokens=True)
+
+        for i, (pred, gold) in enumerate(zip(preds, golds)):
+            if not pred.strip():
+                empty_count += 1
+            em = compute_exact_match(pred, gold)
+            f1 = compute_f1(pred, gold)
+            rl = compute_rouge_l(pred, gold)
+            all_em.append(em)
+            all_f1.append(f1)
+            all_rouge.append(rl)
+            all_loss.append(batch_loss)
+
+            q_text = questions[i] if isinstance(questions, list) and i < len(questions) else ""
+            ctx = doc_previews[i] if i < len(doc_previews) else ""
+            samples.append(SampleResult(
+                idx=global_idx, question=q_text, gold=gold,
+                prediction=pred, context_preview=ctx,
+                em=em, f1=f1, rouge_l=rl, source=source_label,
+            ))
+            global_idx += 1
+
+    if accelerator.is_main_process:
+        print()
+
+    n = max(len(all_em), 1)
+    avg_loss = sum(all_loss) / max(len(all_loss), 1)
+    metrics = {
+        "loss": avg_loss,
+        "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
+        "exact_match": sum(all_em) / n,
+        "f1": sum(all_f1) / n,
+        "rouge_l": sum(all_rouge) / n,
+        "n_samples": len(all_em),
+        "empty_preds": empty_count,
+    }
+    return metrics, samples
+
+
 # ── Stdout: summary statistics ───────────────────────────────────────────────
 
 
@@ -289,26 +410,37 @@ def print_summary(results: List[ModelResult]):
     print(f"{BOLD}{header}{RESET}")
     print(f"  {'─' * (W - 4)}")
 
+    # Separate baselines (q_value <= 0) and compressed models
+    baselines = [r for r in results if r.q_value <= 0]
+    compressed = [r for r in results if r.q_value > 0]
+
     best_f1 = max((r.dev_f1 for r in results), default=0)
     best_em = max((r.dev_em for r in results), default=0)
 
-    for r in results:
-        name = f"Q={r.q_value}"
-        # Highlight best
+    def _print_row(r):
+        name = r.name if r.q_value <= 0 else f"Q={r.q_value}"
         em_s = f"{r.dev_em:>6.2%}"
         f1_s = f"{r.dev_f1:>7.4f}"
         if r.dev_f1 == best_f1 and len(results) > 1:
             f1_s = f"{GREEN}{f1_s}{RESET}"
         if r.dev_em == best_em and len(results) > 1:
             em_s = f"{GREEN}{em_s}{RESET}"
-
         de = f"{r.dev_empty_preds}" if r.dev_n > 0 else "-"
         te = f"{r.train_empty_preds}" if r.train_n > 0 else "-"
-
         print(f"  {name:<12}  {r.dev_loss:>6.3f} {r.dev_ppl:>7.2f} "
               f"{em_s} {f1_s} {r.dev_rouge_l:>7.4f} {de:>6}  "
               f"{r.train_loss:>6.3f} {r.train_ppl:>7.2f} "
               f"{r.train_em:>6.2%} {r.train_f1:>7.4f} {r.train_rouge_l:>7.4f} {te:>6}")
+
+    # Baselines first (upper bound)
+    if baselines:
+        for r in baselines:
+            _print_row(r)
+        print(f"  {'─' * (W - 4)}")
+
+    # Compressed models
+    for r in compressed:
+        _print_row(r)
 
     print(f"  {'─' * (W - 4)}")
 
@@ -317,6 +449,7 @@ def print_summary(results: List[ModelResult]):
     for r in results:
         if r.train_n == 0:
             continue
+        label = r.name if r.q_value <= 0 else f"Q={r.q_value}"
         gap = r.train_f1 - r.dev_f1
         if gap > 0.10:
             tag = f"{RED}HIGH{RESET}"
@@ -324,26 +457,29 @@ def print_summary(results: List[ModelResult]):
             tag = f"{YELLOW}MODERATE{RESET}"
         else:
             tag = f"{GREEN}LOW{RESET}"
-        print(f"    Q={r.q_value:<5}  gap = {gap:+.4f}  {tag}")
+        print(f"    {label:<12} gap = {gap:+.4f}  {tag}")
 
     # ── Bar charts ──
+    def _label(r):
+        return r.name if r.q_value <= 0 else f"Q={r.q_value}"
+
     print(f"\n  {BOLD}Dev F1:{RESET}")
     max_f1 = max((r.dev_f1 for r in results), default=0.001)
     for r in results:
         b = bar(r.dev_f1, max_f1, 35)
-        print(f"    Q={r.q_value:<5} {CYAN}{b}{RESET} {r.dev_f1:.4f}")
+        print(f"    {_label(r):<12} {CYAN}{b}{RESET} {r.dev_f1:.4f}")
 
     print(f"\n  {BOLD}Dev EM:{RESET}")
     max_em = max((r.dev_em for r in results), default=0.001)
     for r in results:
         b = bar(r.dev_em, max_em, 35)
-        print(f"    Q={r.q_value:<5} {MAGENTA}{b}{RESET} {r.dev_em:.2%}")
+        print(f"    {_label(r):<12} {MAGENTA}{b}{RESET} {r.dev_em:.2%}")
 
     print(f"\n  {BOLD}Dev PPL (lower=better):{RESET}")
     max_ppl = max((r.dev_ppl for r in results), default=1)
     for r in results:
         b = bar(r.dev_ppl, max_ppl, 35)
-        print(f"    Q={r.q_value:<5} {YELLOW}{b}{RESET} {r.dev_ppl:.2f}")
+        print(f"    {_label(r):<12} {YELLOW}{b}{RESET} {r.dev_ppl:.2f}")
 
     # ── Ranking ──
     print(f"\n{'=' * W}")
@@ -353,10 +489,12 @@ def print_summary(results: List[ModelResult]):
     medals = {0: "1.", 1: "2.", 2: "3."}
     for i, r in enumerate(ranked):
         m = medals.get(i, f"{i+1}.")
-        print(f"  {m:<4} Q={r.q_value:<5}  "
+        label = r.name if r.q_value <= 0 else f"Q={r.q_value}"
+        baseline_tag = " (baseline)" if r.q_value <= 0 else ""
+        print(f"  {m:<4} {label:<12}  "
               f"F1={r.dev_f1:.4f}  EM={r.dev_em:.2%}  "
               f"PPL={r.dev_ppl:.2f}  Loss={r.dev_loss:.4f}  "
-              f"({r.dev_n} samples)")
+              f"({r.dev_n} samples){baseline_tag}")
     print(f"{'=' * W}\n")
 
 
@@ -385,11 +523,14 @@ def write_markdown_report(results: List[ModelResult], report_path: str,
 
         # ── Summary table ──
         f.write("## Summary\n\n")
+        def _md_name(r):
+            return f"**{r.name}** (baseline)" if r.q_value <= 0 else f"Q={r.q_value}"
+
         f.write("### Dev Set\n\n")
         f.write("| Model | Loss | PPL | EM | F1 | ROUGE-L | Empty Preds | N |\n")
         f.write("|-------|------|-----|----|----|---------|-------------|---|\n")
         for r in results:
-            f.write(f"| Q={r.q_value} | {r.dev_loss:.4f} | {r.dev_ppl:.2f} | "
+            f.write(f"| {_md_name(r)} | {r.dev_loss:.4f} | {r.dev_ppl:.2f} | "
                     f"{r.dev_em:.2%} | {r.dev_f1:.4f} | {r.dev_rouge_l:.4f} | "
                     f"{r.dev_empty_preds} ({100*r.dev_empty_preds/max(r.dev_n,1):.1f}%) | "
                     f"{r.dev_n} |\n")
@@ -401,7 +542,7 @@ def write_markdown_report(results: List[ModelResult], report_path: str,
             for r in results:
                 if r.train_n == 0:
                     continue
-                f.write(f"| Q={r.q_value} | {r.train_loss:.4f} | {r.train_ppl:.2f} | "
+                f.write(f"| {_md_name(r)} | {r.train_loss:.4f} | {r.train_ppl:.2f} | "
                         f"{r.train_em:.2%} | {r.train_f1:.4f} | {r.train_rouge_l:.4f} | "
                         f"{r.train_empty_preds} ({100*r.train_empty_preds/max(r.train_n,1):.1f}%) | "
                         f"{r.train_n} |\n")
@@ -416,15 +557,18 @@ def write_markdown_report(results: List[ModelResult], report_path: str,
                     continue
                 gap = r.train_f1 - r.dev_f1
                 level = "HIGH" if gap > 0.10 else ("MODERATE" if gap > 0.05 else "LOW")
-                f.write(f"| Q={r.q_value} | {r.dev_f1:.4f} | {r.train_f1:.4f} | "
+                f.write(f"| {_md_name(r)} | {r.dev_f1:.4f} | {r.train_f1:.4f} | "
                         f"{gap:+.4f} | {level} |\n")
 
         # ── Per-model sample details ──
         ranked = sorted(results, key=lambda r: r.dev_f1, reverse=True)
         for r in ranked:
-            f.write(f"\n---\n\n## Q={r.q_value}\n\n")
-            f.write(f"- **Checkpoint**: `{r.checkpoint_path}`\n")
-            f.write(f"- **Config**: `{r.config_path}`\n")
+            title = r.name if r.q_value <= 0 else f"Q={r.q_value}"
+            baseline_note = " (Baseline — no compression)" if r.q_value <= 0 else ""
+            f.write(f"\n---\n\n## {title}{baseline_note}\n\n")
+            f.write(f"- **Model / Checkpoint**: `{r.checkpoint_path}`\n")
+            if r.config_path:
+                f.write(f"- **Config**: `{r.config_path}`\n")
             f.write(f"- **Dev**: Loss={r.dev_loss:.4f}  PPL={r.dev_ppl:.2f}  "
                     f"EM={r.dev_em:.2%}  F1={r.dev_f1:.4f}  ROUGE-L={r.dev_rouge_l:.4f}\n")
             if r.train_n > 0:
@@ -536,6 +680,10 @@ def main():
                         help="Comma-separated checkpoint dirs (default: auto-discover)")
     parser.add_argument("--outputs_dir", type=str, default="outputs",
                         help="Base outputs dir (default: outputs)")
+    parser.add_argument("--models_dir", type=str, default="models",
+                        help="Dir containing baseline models (default: models)")
+    parser.add_argument("--no_baselines", action="store_true",
+                        help="Skip baseline model evaluation")
     parser.add_argument("--top_n", type=int, default=10,
                         help="Best/worst samples per model in report (default=10)")
     parser.add_argument("--batch_size", type=int, default=0,
@@ -582,10 +730,13 @@ def main():
     is_main = accelerator.is_main_process
 
     if is_main:
+        baseline_models = [] if args.no_baselines else discover_baseline_models(args.models_dir)
         print(f"\n{'=' * W}")
         print(f"  {BOLD}DEEP COMPRESSOR — QA EVALUATION{RESET}")
         print(f"{'=' * W}")
-        print(f"  Models:      {len(entries)}  ({', '.join(f'Q={q}' for _, _, q in entries)})")
+        print(f"  Compressed:  {len(entries)}  ({', '.join(f'Q={q}' for _, _, q in entries)})")
+        if baseline_models:
+            print(f"  Baselines:   {len(baseline_models)}  ({', '.join(n for _, n in baseline_models)})")
         print(f"  Dev data:    {args.eval_data}")
         print(f"  Dev samples: {args.max_eval_samples if args.max_eval_samples > 0 else 'ALL'}")
         print(f"  Train peek:  {args.train_peek_samples}")
@@ -599,9 +750,116 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # ── Shared data loading helpers ──
+    # Use first compressed model's config for data params (doc/question/answer lengths).
+    # Baselines and compressed models eval on the same data split for fair comparison.
+    ref_config = DeepCompressorConfig.from_yaml(str(entries[0][1]))
+    max_doc = ref_config.qwen.max_doc_tokens
+    max_q = ref_config.qwen.max_question_tokens
+    max_ans = ref_config.qwen.max_answer_tokens
+
     # ── Evaluate each model ──
     all_results: List[ModelResult] = []
 
+    # ── Baseline models (raw Qwen, no compression) ──
+    if not args.no_baselines:
+        baseline_models = discover_baseline_models(args.models_dir)
+        for model_path, display_name in baseline_models:
+            if is_main:
+                print(f"{'─' * W}")
+                print(f"  {BOLD}{display_name} (baseline){RESET}  ({model_path})")
+                print(f"  Loading model...")
+
+            qwen = AutoModelForCausalLM.from_pretrained(
+                model_path, trust_remote_code=True,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            )
+            qwen.eval()
+            for p in qwen.parameters():
+                p.requires_grad = False
+            qwen = accelerator.prepare(qwen)
+
+            collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
+            nw = 0 if accelerator.device.type == "mps" else 2
+            pin = accelerator.device.type == "cuda"
+            bs = args.batch_size if args.batch_size > 0 else 8  # conservative for full-context
+
+            mr = ModelResult(
+                name=display_name, q_value=0,
+                config_path="", checkpoint_path=model_path,
+            )
+
+            # Dev
+            if is_main:
+                print(f"  Loading dev data...")
+            dev_ds = QADataset(
+                args.eval_data, tokenizer,
+                max_doc_tokens=max_doc, max_question_tokens=max_q,
+                max_answer_tokens=max_ans,
+            )
+            if args.max_eval_samples > 0 and args.max_eval_samples < len(dev_ds):
+                dev_ds = Subset(dev_ds, list(range(args.max_eval_samples)))
+
+            dev_loader = DataLoader(dev_ds, batch_size=bs, shuffle=False,
+                                    collate_fn=collator, num_workers=nw, pin_memory=pin)
+            dev_loader = accelerator.prepare(dev_loader)
+
+            dev_m, dev_s = evaluate_baseline_qa(
+                qwen, dev_loader, tokenizer, accelerator,
+                max_new_tokens=max_ans, source_label="dev")
+
+            mr.dev_loss = dev_m["loss"]
+            mr.dev_ppl = dev_m["perplexity"]
+            mr.dev_em = dev_m["exact_match"]
+            mr.dev_f1 = dev_m["f1"]
+            mr.dev_rouge_l = dev_m["rouge_l"]
+            mr.dev_n = dev_m["n_samples"]
+            mr.dev_empty_preds = dev_m["empty_preds"]
+            mr.samples.extend(dev_s)
+
+            if is_main:
+                print(f"  {GREEN}Dev:{RESET}   Loss={mr.dev_loss:.4f}  PPL={mr.dev_ppl:.2f}  "
+                      f"EM={mr.dev_em:.2%}  F1={mr.dev_f1:.4f}  "
+                      f"Empty={mr.dev_empty_preds}/{mr.dev_n}")
+
+            # Train peek
+            if args.train_peek_samples > 0 and os.path.exists(args.train_data):
+                train_ds = QADataset(
+                    args.train_data, tokenizer,
+                    max_doc_tokens=max_doc, max_question_tokens=max_q,
+                    max_answer_tokens=max_ans,
+                )
+                if args.train_peek_samples < len(train_ds):
+                    train_ds = Subset(train_ds, list(range(args.train_peek_samples)))
+
+                train_loader = DataLoader(train_ds, batch_size=bs, shuffle=False,
+                                          collate_fn=collator, num_workers=nw, pin_memory=pin)
+                train_loader = accelerator.prepare(train_loader)
+
+                tr_m, tr_s = evaluate_baseline_qa(
+                    qwen, train_loader, tokenizer, accelerator,
+                    max_new_tokens=max_ans, source_label="train")
+
+                mr.train_loss = tr_m["loss"]
+                mr.train_ppl = tr_m["perplexity"]
+                mr.train_em = tr_m["exact_match"]
+                mr.train_f1 = tr_m["f1"]
+                mr.train_rouge_l = tr_m["rouge_l"]
+                mr.train_n = tr_m["n_samples"]
+                mr.train_empty_preds = tr_m["empty_preds"]
+                mr.samples.extend(tr_s)
+
+                if is_main:
+                    print(f"  {YELLOW}Train:{RESET} Loss={mr.train_loss:.4f}  PPL={mr.train_ppl:.2f}  "
+                          f"EM={mr.train_em:.2%}  F1={mr.train_f1:.4f}  "
+                          f"Empty={mr.train_empty_preds}/{mr.train_n}")
+
+            all_results.append(mr)
+            del qwen
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    # ── Compressed models (DeepCompressor) ──
     for ckpt_dir, config_path, q_value in entries:
         if is_main:
             print(f"{'─' * W}")
