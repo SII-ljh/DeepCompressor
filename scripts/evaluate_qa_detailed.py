@@ -268,6 +268,30 @@ def evaluate_qa_detailed(
     return metrics, samples
 
 
+# ── Left-padding helper for decoder-only generation ──────────────────────────
+
+
+def _left_pad(input_ids: torch.Tensor, attention_mask: torch.Tensor,
+              pad_token_id: int):
+    """Convert right-padded (input_ids, attention_mask) to left-padded.
+
+    Decoder-only models (GPT, Qwen, LLaMA, ...) generate auto-regressively
+    from the rightmost real token.  Right-padding puts PAD tokens at the end,
+    so shorter sequences would start generation from a PAD position — producing
+    empty or garbage output.  Left-padding aligns real content to the right
+    edge, which is what generate() expects.
+    """
+    B, L = input_ids.shape
+    lengths = attention_mask.sum(dim=1)  # actual length per sample
+    new_ids = torch.full_like(input_ids, pad_token_id)
+    new_mask = torch.zeros_like(attention_mask)
+    for i in range(B):
+        slen = int(lengths[i].item())
+        new_ids[i, L - slen:] = input_ids[i, :slen]
+        new_mask[i, L - slen:] = 1
+    return new_ids, new_mask
+
+
 # ── Baseline (raw Qwen) evaluation ───────────────────────────────────────────
 
 
@@ -334,8 +358,11 @@ def evaluate_baseline_qa(
         batch_loss = outputs.loss.detach().item()
 
         # Generate: feed [doc | question], generate answer
+        # Left-pad for correct decoder-only batched generation
         gen_input = torch.cat([doc_ids, q_ids], dim=1)
         gen_mask = torch.cat([doc_mask, q_mask], dim=1)
+        gen_input, gen_mask = _left_pad(gen_input, gen_mask, tokenizer.pad_token_id)
+        input_len = gen_input.shape[1]
         gen_out = unwrapped.generate(
             input_ids=gen_input, attention_mask=gen_mask,
             max_new_tokens=max_new_tokens, do_sample=False,
@@ -344,7 +371,7 @@ def evaluate_baseline_qa(
             repetition_penalty=1.2,
         )
         # Strip input prefix from generated output
-        gen_only = gen_out[:, gen_input.shape[1]:]
+        gen_only = gen_out[:, input_len:]
         preds = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
 
         golds = batch["answer_text"]

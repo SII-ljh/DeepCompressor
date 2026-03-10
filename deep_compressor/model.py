@@ -186,11 +186,15 @@ class DeepCompressor(nn.Module):
         """Generate answer tokens given compressed prefix and question.
 
         Uses greedy decoding (do_sample=False) for reproducible evaluation.
+        Internally converts right-padded questions to left-padded layout,
+        which is required for correct batched generation with decoder-only
+        models (the model auto-regressively continues from the rightmost
+        real token).
 
         Args:
             prefix_embeds: (batch, num_queries, qwen_dim) — from UpMLP
-            question_ids: (batch, q_len)
-            question_mask: (batch, q_len)
+            question_ids: (batch, q_len)  — right-padded
+            question_mask: (batch, q_len) — 1 for real tokens, 0 for padding
             tokenizer: tokenizer with pad_token_id and eos_token_id
             max_new_tokens: maximum number of tokens to generate
         Returns:
@@ -200,24 +204,43 @@ class DeepCompressor(nn.Module):
         q_embeds = embed_layer(question_ids)  # (B, q_len, D)
 
         # Align prefix_embeds dtype with q_embeds to avoid mismatch in generate()
-        # Use q_embeds dtype as reference (it comes from Qwen's embedding layer)
         prefix_embeds = prefix_embeds.to(dtype=q_embeds.dtype)
-        inputs_embeds = torch.cat([prefix_embeds, q_embeds], dim=1)
 
         B = prefix_embeds.shape[0]
         prefix_len = prefix_embeds.shape[1]
+        D = prefix_embeds.shape[2]
+
+        # Build right-padded [prefix | question], then convert to left-padded.
+        # prefix has no padding (fixed size), question may have right-padding.
+        # Combined right-padded layout:
+        #   [prefix_0..prefix_Q, q_tok_0..q_tok_real, PAD..PAD]
+        # After left-padding:
+        #   [PAD..PAD, prefix_0..prefix_Q, q_tok_0..q_tok_real]
+        combined_embeds = torch.cat([prefix_embeds, q_embeds], dim=1)
         prefix_mask = torch.ones(B, prefix_len, device=prefix_embeds.device,
                                  dtype=question_mask.dtype)
-        attention_mask = torch.cat([prefix_mask, question_mask], dim=1)
+        combined_mask = torch.cat([prefix_mask, question_mask], dim=1)
+
+        # Per-sample actual length (prefix is always full, only question varies)
+        seq_lens = combined_mask.sum(dim=1)  # (B,)
+        max_len = combined_embeds.shape[1]
+
+        left_embeds = torch.zeros_like(combined_embeds)
+        left_mask = torch.zeros_like(combined_mask)
+        for i in range(B):
+            slen = int(seq_lens[i].item())
+            # Move real content (first slen positions) to right-aligned position
+            left_embeds[i, max_len - slen:] = combined_embeds[i, :slen]
+            left_mask[i, max_len - slen:] = 1
 
         out = self.qwen.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            inputs_embeds=left_embeds,
+            attention_mask=left_mask,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            repetition_penalty=1.2,  # Prevent repetitive generation
+            repetition_penalty=1.2,
         )
         # With inputs_embeds, generate() returns ONLY generated tokens
         # (no input positions to strip), so return as-is.
