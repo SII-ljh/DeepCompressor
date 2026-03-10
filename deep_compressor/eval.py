@@ -8,6 +8,7 @@ Provides:
   - Latency measurement utilities
 """
 
+import logging
 import re
 import string
 import time
@@ -16,6 +17,8 @@ from typing import Callable, Dict, List
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_text(s: str) -> str:
@@ -265,11 +268,14 @@ def evaluate_ntp(model, eval_loader: DataLoader,
             segment_ids = batch["segment_ids"]
             segment_labels = batch["segment_labels"]
 
+            # Determine model compute dtype to avoid bf16/float32 mismatch
+            compute_dtype = next(unwrapped.qwen.parameters()).dtype
+
             # Encode and compress
             byte_array = unwrapped.encode_document(doc_ids, doc_mask)
             B = doc_ids.shape[0]
             zero_pooled = torch.zeros(B, unwrapped.config.qwen.hidden_size,
-                                     device=doc_ids.device)
+                                     device=doc_ids.device, dtype=compute_dtype)
             queries = unwrapped.query_init(zero_pooled)
             latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
             prefix_embeds = unwrapped.up_mlp(latent)
@@ -312,19 +318,20 @@ def evaluate_ntp(model, eval_loader: DataLoader,
                 doc_mask = batch["doc_attention_mask"][:1]
                 segment_ids = batch["segment_ids"][:1]
 
+                # Determine model compute dtype to avoid bf16/float32 mismatch
+                compute_dtype = next(unwrapped.qwen.parameters()).dtype
+
                 # Encode and compress
                 byte_array = unwrapped.encode_document(doc_ids, doc_mask)
                 B = doc_ids.shape[0]
                 zero_pooled = torch.zeros(B, unwrapped.config.qwen.hidden_size,
-                                         device=doc_ids.device)
+                                         device=doc_ids.device, dtype=compute_dtype)
                 queries = unwrapped.query_init(zero_pooled)
                 latent = unwrapped.compress(queries, byte_array, byte_mask=doc_mask)
                 prefix_embeds = unwrapped.up_mlp(latent)
 
-                # Align dtype
-                embed_layer = unwrapped.qwen.get_input_embeddings()
-                dummy_embeds = embed_layer(segment_ids[:, :1])
-                prefix_embeds = prefix_embeds.to(dtype=dummy_embeds.dtype)
+                # Align dtype with Qwen's compute dtype
+                prefix_embeds = prefix_embeds.to(dtype=compute_dtype)
 
                 # Generate continuation
                 prefix_len = prefix_embeds.shape[1]
@@ -350,7 +357,7 @@ def evaluate_ntp(model, eval_loader: DataLoader,
                     "doc_preview": doc_preview,
                 })
             except Exception as e:
-                pass  # Skip failed samples
+                logger.warning(f"Sample prediction failed: {e}")
 
     # Gather across processes
     stats = torch.tensor([total_loss, float(total_samples)],
