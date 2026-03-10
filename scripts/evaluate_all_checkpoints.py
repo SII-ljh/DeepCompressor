@@ -63,6 +63,9 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
 import torch
+# Disable cuDNN SDPA backend — crashes on certain GQA configs (e.g. Qwen3-4B)
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_cudnn_sdp(False)
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoModelForCausalLM, AutoTokenizer

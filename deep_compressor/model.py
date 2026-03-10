@@ -7,6 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Disable cuDNN SDPA backend — crashes on certain GQA configs (e.g. Qwen3-4B)
+# with "mha_graph->execute(...).is_good() == false".
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_cudnn_sdp(False)
+
 from deep_compressor.config import DeepCompressorConfig
 from deep_compressor.loss import DistillationLoss, compute_total_loss
 from deep_compressor.modules.down_proj import build_down_proj

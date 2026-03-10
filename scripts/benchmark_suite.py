@@ -52,6 +52,9 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
+# Disable cuDNN SDPA backend — crashes on certain GQA configs (e.g. Qwen3-4B)
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_cudnn_sdp(False)
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoModelForCausalLM, AutoTokenizer

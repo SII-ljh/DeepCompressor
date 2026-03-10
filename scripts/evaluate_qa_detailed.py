@@ -41,6 +41,11 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
 import torch
+# Disable cuDNN SDPA backend — it crashes on certain GQA configs (e.g. Qwen3-4B)
+# with "mha_graph->execute(...).is_good() == false".  The flash_attention_2 and
+# math backends are unaffected and will be selected automatically instead.
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_cudnn_sdp(False)
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -397,7 +402,7 @@ def evaluate_baseline_qa(
         q_mask = batch["q_attention_mask"]
         ans_ids = batch["answer_ids"]
         ans_labels = batch["answer_labels"]
-        ans_mask = torch.ones_like(ans_ids)  # answer has no padding
+        ans_mask = batch["answer_attention_mask"]
 
         # Teacher-forcing loss: strip per-field padding, re-concat, right-pad
         # Labels: -100 for doc+question, real labels for answer only
