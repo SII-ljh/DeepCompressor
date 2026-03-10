@@ -268,28 +268,84 @@ def evaluate_qa_detailed(
     return metrics, samples
 
 
-# ── Left-padding helper for decoder-only generation ──────────────────────────
+# ── Padding helpers for decoder-only generation ──────────────────────────────
 
 
-def _left_pad(input_ids: torch.Tensor, attention_mask: torch.Tensor,
-              pad_token_id: int):
-    """Convert right-padded (input_ids, attention_mask) to left-padded.
+def _strip_and_concat(fields_ids: List[torch.Tensor],
+                      fields_masks: List[torch.Tensor],
+                      sample_idx: int) -> torch.Tensor:
+    """For one sample, strip padding from each field and concatenate."""
+    parts = []
+    for ids, mask in zip(fields_ids, fields_masks):
+        real_len = int(mask[sample_idx].sum().item())
+        parts.append(ids[sample_idx, :real_len])
+    return torch.cat(parts)
 
-    Decoder-only models (GPT, Qwen, LLaMA, ...) generate auto-regressively
-    from the rightmost real token.  Right-padding puts PAD tokens at the end,
-    so shorter sequences would start generation from a PAD position — producing
-    empty or garbage output.  Left-padding aligns real content to the right
-    edge, which is what generate() expects.
+
+def _build_left_padded(fields_ids: List[torch.Tensor],
+                       fields_masks: List[torch.Tensor],
+                       pad_token_id: int):
+    """Strip per-field padding, concatenate, then left-pad the batch.
+
+    Each field (doc, question, ...) is independently right-padded by the
+    collator.  Naive ``torch.cat`` scatters PAD tokens in the middle of the
+    sequence, which breaks both generation and loss.  This helper extracts
+    only real tokens from each field, concatenates them contiguously, and
+    left-pads so the rightmost position is always a real token — required
+    for correct decoder-only batched ``generate()``.
     """
-    B, L = input_ids.shape
-    lengths = attention_mask.sum(dim=1)  # actual length per sample
-    new_ids = torch.full_like(input_ids, pad_token_id)
-    new_mask = torch.zeros_like(attention_mask)
+    B = fields_ids[0].shape[0]
+    device = fields_ids[0].device
+    dtype = fields_ids[0].dtype
+
+    sequences = [_strip_and_concat(fields_ids, fields_masks, i)
+                 for i in range(B)]
+    max_len = max(s.shape[0] for s in sequences)
+
+    out_ids = torch.full((B, max_len), pad_token_id, dtype=dtype, device=device)
+    out_mask = torch.zeros((B, max_len), dtype=torch.long, device=device)
+    for i, seq in enumerate(sequences):
+        slen = seq.shape[0]
+        out_ids[i, max_len - slen:] = seq
+        out_mask[i, max_len - slen:] = 1
+    return out_ids, out_mask
+
+
+def _build_right_padded(fields_ids: List[torch.Tensor],
+                        fields_masks: List[torch.Tensor],
+                        fields_labels: List[torch.Tensor],
+                        pad_token_id: int, label_pad: int = -100):
+    """Strip per-field padding, concatenate, then right-pad (for loss).
+
+    Same stripping logic as ``_build_left_padded`` but pads on the right,
+    which is the standard layout for teacher-forcing loss computation
+    with ``attention_mask`` and ``labels=-100`` for padding positions.
+    """
+    B = fields_ids[0].shape[0]
+    device = fields_ids[0].device
+    dtype = fields_ids[0].dtype
+
+    id_seqs, label_seqs = [], []
     for i in range(B):
-        slen = int(lengths[i].item())
-        new_ids[i, L - slen:] = input_ids[i, :slen]
-        new_mask[i, L - slen:] = 1
-    return new_ids, new_mask
+        id_parts, label_parts = [], []
+        for ids, mask, labels in zip(fields_ids, fields_masks, fields_labels):
+            real_len = int(mask[i].sum().item())
+            id_parts.append(ids[i, :real_len])
+            label_parts.append(labels[i, :real_len])
+        id_seqs.append(torch.cat(id_parts))
+        label_seqs.append(torch.cat(label_parts))
+
+    max_len = max(s.shape[0] for s in id_seqs)
+
+    out_ids = torch.full((B, max_len), pad_token_id, dtype=dtype, device=device)
+    out_mask = torch.zeros((B, max_len), dtype=torch.long, device=device)
+    out_labels = torch.full((B, max_len), label_pad, dtype=dtype, device=device)
+    for i in range(B):
+        slen = id_seqs[i].shape[0]
+        out_ids[i, :slen] = id_seqs[i]
+        out_mask[i, :slen] = 1
+        out_labels[i, :slen] = label_seqs[i]
+    return out_ids, out_mask, out_labels
 
 
 # ── Baseline (raw Qwen) evaluation ───────────────────────────────────────────
@@ -341,27 +397,27 @@ def evaluate_baseline_qa(
         q_mask = batch["q_attention_mask"]
         ans_ids = batch["answer_ids"]
         ans_labels = batch["answer_labels"]
+        ans_mask = torch.ones_like(ans_ids)  # answer has no padding
 
-        # Concatenate: [doc | question | answer] for teacher-forcing loss
-        input_ids = torch.cat([doc_ids, q_ids, ans_ids], dim=1)
-        attn_mask = torch.cat([doc_mask, q_mask,
-                               torch.ones_like(ans_ids)], dim=1)
-        # Labels: -100 for doc+question, real labels for answer
+        # Teacher-forcing loss: strip per-field padding, re-concat, right-pad
+        # Labels: -100 for doc+question, real labels for answer only
         ignore_doc = torch.full_like(doc_ids, -100)
         ignore_q = torch.full_like(q_ids, -100)
-        labels = torch.cat([ignore_doc, ignore_q, ans_labels], dim=1)
-
+        input_ids, attn_mask, labels = _build_right_padded(
+            [doc_ids, q_ids, ans_ids],
+            [doc_mask, q_mask, ans_mask],
+            [ignore_doc, ignore_q, ans_labels],
+            tokenizer.pad_token_id,
+        )
         outputs = unwrapped(
             input_ids=input_ids, attention_mask=attn_mask,
             labels=labels, use_cache=False,
         )
         batch_loss = outputs.loss.detach().item()
 
-        # Generate: feed [doc | question], generate answer
-        # Left-pad for correct decoder-only batched generation
-        gen_input = torch.cat([doc_ids, q_ids], dim=1)
-        gen_mask = torch.cat([doc_mask, q_mask], dim=1)
-        gen_input, gen_mask = _left_pad(gen_input, gen_mask, tokenizer.pad_token_id)
+        # Generate: strip per-field padding, re-concat, left-pad
+        gen_input, gen_mask = _build_left_padded(
+            [doc_ids, q_ids], [doc_mask, q_mask], tokenizer.pad_token_id)
         input_len = gen_input.shape[1]
         gen_out = unwrapped.generate(
             input_ids=gen_input, attention_mask=gen_mask,
@@ -776,6 +832,10 @@ def main():
         "models/Qwen3-0.6B", trust_remote_code=True, fix_mistral_regex=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Decoder-only models require left-padding for batched generation.
+    # PaddingCollator does its own manual right-padding (unaffected by this),
+    # so this only tells HF's generate() the correct padding direction.
+    tokenizer.padding_side = "left"
 
     # ── Shared data loading helpers ──
     # Use first compressed model's config for data params (doc/question/answer lengths).
