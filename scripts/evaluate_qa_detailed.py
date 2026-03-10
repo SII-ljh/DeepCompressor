@@ -2,34 +2,25 @@
 """Detailed QA evaluation across all experiments with per-sample analysis.
 
 Auto-discovers checkpoint-best directories under outputs/, loads each model,
-evaluates on both held-out dev set and a sample from the training set, then
-prints a comprehensive comparison table followed by ranked per-model samples
-(best 10 and worst 10 by F1).
+evaluates on both held-out dev set and a sample from the training set.
+
+- **stdout**: summary statistics only (comparison table, bar charts, ranking)
+- **markdown report**: full per-sample analysis saved to results/qa_eval_report.md
 
 Usage:
-    # Basic: evaluate all experiments on dev set (500 samples) + train peek (100 samples)
+    # Basic (500 dev + 100 train peek)
     python scripts/evaluate_qa_detailed.py
 
-    # Full dev set evaluation
+    # Full dev set
     python scripts/evaluate_qa_detailed.py --max_eval_samples 0
 
-    # Custom paths
-    python scripts/evaluate_qa_detailed.py \
-        --eval_data data/qa_large_dev.json \
-        --train_data data/qa_large_train.json \
-        --max_eval_samples 500 \
-        --train_peek_samples 100
-
-    # Evaluate specific checkpoints only
+    # Specific checkpoints
     python scripts/evaluate_qa_detailed.py \
         --checkpoints outputs/qa_q256_8gpu,outputs/qa_q1024_8gpu
 
     # Multi-GPU
     accelerate launch --multi_gpu --num_processes 4 \
         scripts/evaluate_qa_detailed.py --max_eval_samples 1000
-
-    # Save results to CSV
-    python scripts/evaluate_qa_detailed.py --output results/qa_detailed.csv
 """
 
 import argparse
@@ -40,8 +31,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 # Add project root to Python path
 script_dir = Path(__file__).parent
@@ -59,7 +51,6 @@ from deep_compressor.eval import (
     compute_exact_match,
     compute_f1,
     compute_rouge_l,
-    normalize_text,
 )
 from deep_compressor.model import DeepCompressor
 
@@ -70,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Pretty-print helpers ─────────────────────────────────────────────────────
+# ── Terminal colors ──────────────────────────────────────────────────────────
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -80,30 +71,18 @@ RED = "\033[91m"
 CYAN = "\033[96m"
 MAGENTA = "\033[95m"
 RESET = "\033[0m"
-UNDERLINE = "\033[4m"
 
-W = 110  # total output width
-
-
-def hline(char="─"):
-    return char * W
-
-
-def section(title: str):
-    pad = (W - len(title) - 4) // 2
-    return f"\n{'━' * pad}  {BOLD}{title}{RESET}  {'━' * pad}"
+W = 100  # terminal output width
 
 
 def bar(value: float, max_val: float, width: int = 30) -> str:
-    """Render a horizontal bar chart character."""
     if max_val <= 0:
         return ""
-    filled = int(round(value / max_val * width))
-    filled = min(filled, width)
-    return "█" * filled + "░" * (width - filled)
+    filled = min(int(round(value / max_val * width)), width)
+    return "\u2588" * filled + "\u2591" * (width - filled)
 
 
-# ── Per-sample result container ──────────────────────────────────────────────
+# ── Data containers ──────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -125,21 +104,23 @@ class ModelResult:
     q_value: int
     config_path: str
     checkpoint_path: str
-    # Aggregate metrics (dev set)
+    # Dev metrics
     dev_loss: float = 0.0
     dev_ppl: float = 0.0
     dev_em: float = 0.0
     dev_f1: float = 0.0
     dev_rouge_l: float = 0.0
     dev_n: int = 0
-    # Aggregate metrics (train peek)
+    dev_empty_preds: int = 0
+    # Train metrics
     train_loss: float = 0.0
     train_ppl: float = 0.0
     train_em: float = 0.0
     train_f1: float = 0.0
     train_rouge_l: float = 0.0
     train_n: int = 0
-    # Per-sample results
+    train_empty_preds: int = 0
+    # Per-sample
     samples: List[SampleResult] = field(default_factory=list)
 
 
@@ -147,7 +128,7 @@ class ModelResult:
 
 
 def discover_checkpoints(base_dir: str = "outputs") -> List[Tuple[Path, Path, int]]:
-    """Return list of (checkpoint_dir, config_path, q_value) sorted by Q."""
+    """Return (checkpoint_dir, config_path, q_value) sorted by Q."""
     base = Path(base_dir)
     if not base.exists():
         return []
@@ -156,7 +137,6 @@ def discover_checkpoints(base_dir: str = "outputs") -> List[Tuple[Path, Path, in
     for exp_dir in sorted(base.iterdir()):
         if not exp_dir.is_dir():
             continue
-        # Prefer checkpoint-best, fallback to checkpoint-final
         best = exp_dir / "checkpoint-best" / "trainable_weights.pt"
         final = exp_dir / "checkpoint-final" / "trainable_weights.pt"
         if best.exists():
@@ -166,17 +146,14 @@ def discover_checkpoints(base_dir: str = "outputs") -> List[Tuple[Path, Path, in
         else:
             continue
 
-        # Find matching config
-        name = exp_dir.name  # e.g. "qa_q1024_8gpu"
+        name = exp_dir.name
         config_path = Path("configs") / f"{name}.yaml"
         if not config_path.exists():
-            logger.warning(f"No config found for {name}, skipping")
+            logger.warning(f"No config for {name}, skipping")
             continue
 
-        # Extract Q value
         m = re.search(r"_q(\d+)", name)
         q_value = int(m.group(1)) if m else -1
-
         found.append((ckpt_dir, config_path, q_value))
 
     found.sort(key=lambda x: x[2])
@@ -190,7 +167,6 @@ def load_model(checkpoint_dir: Path, config_path: Path,
                accelerator: Accelerator) -> Tuple[DeepCompressor, DeepCompressorConfig]:
     config = DeepCompressorConfig.from_yaml(str(config_path))
     model = DeepCompressor(config)
-
     weights = torch.load(
         checkpoint_dir / "trainable_weights.pt",
         map_location="cpu", weights_only=True,
@@ -200,36 +176,29 @@ def load_model(checkpoint_dir: Path, config_path: Path,
     return model, config
 
 
-# ── Core evaluation (returns per-sample details) ─────────────────────────────
+# ── Core evaluation ──────────────────────────────────────────────────────────
 
 
 @torch.no_grad()
 def evaluate_qa_detailed(
-    model,
-    eval_loader: DataLoader,
-    tokenizer,
-    accelerator: Accelerator,
-    max_new_tokens: int = 64,
+    model, eval_loader: DataLoader, tokenizer,
+    accelerator: Accelerator, max_new_tokens: int = 64,
     source_label: str = "dev",
 ) -> Tuple[Dict[str, float], List[SampleResult]]:
-    """Evaluate QA and return both aggregates and per-sample results.
-
-    Returns:
-        (metrics_dict, list_of_SampleResult)
-    """
     model.eval()
     unwrapped = accelerator.unwrap_model(model)
 
     all_em, all_f1, all_rouge, all_loss = [], [], [], []
     samples = []
+    empty_count = 0
     global_idx = 0
 
     total_batches = len(eval_loader)
     for batch_idx, batch in enumerate(eval_loader):
         if accelerator.is_main_process and batch_idx % 20 == 0:
             pct = 100 * batch_idx / max(total_batches, 1)
-            print(f"\r  [{source_label}] batch {batch_idx}/{total_batches} ({pct:.0f}%)",
-                  end="", flush=True)
+            print(f"\r  [{source_label}] batch {batch_idx}/{total_batches} "
+                  f"({pct:.0f}%)", end="", flush=True)
 
         # Encode + compress
         byte_array = unwrapped.encode_document(
@@ -245,7 +214,6 @@ def evaluate_qa_detailed(
         suffix_mask = torch.cat(
             [batch["q_attention_mask"],
              torch.ones_like(batch["answer_ids"])], dim=1)
-        q_len = batch["q_input_ids"].shape[1]
         q_labels = torch.full_like(batch["q_input_ids"], -100)
         full_labels = torch.cat([q_labels, batch["answer_labels"]], dim=1)
         outputs = unwrapped.decode(prefix_embeds, suffix_ids, suffix_mask,
@@ -260,12 +228,12 @@ def evaluate_qa_detailed(
 
         golds = batch["answer_text"]
         questions = batch.get("question_text", [""] * len(preds))
-
-        # Decode doc preview (first 120 tokens)
         doc_previews = tokenizer.batch_decode(
             batch["doc_input_ids"][:, :120], skip_special_tokens=True)
 
         for i, (pred, gold) in enumerate(zip(preds, golds)):
+            if not pred.strip():
+                empty_count += 1
             em = compute_exact_match(pred, gold)
             f1 = compute_f1(pred, gold)
             rl = compute_rouge_l(pred, gold)
@@ -295,173 +263,220 @@ def evaluate_qa_detailed(
         "f1": sum(all_f1) / n,
         "rouge_l": sum(all_rouge) / n,
         "n_samples": len(all_em),
+        "empty_preds": empty_count,
     }
     return metrics, samples
 
 
-# ── Pretty output functions ──────────────────────────────────────────────────
+# ── Stdout: summary statistics ───────────────────────────────────────────────
 
 
-def print_comparison_table(results: List[ModelResult]):
-    """Print a comprehensive comparison table."""
-    print(section("COMPARISON TABLE"))
-    print()
+def print_summary(results: List[ModelResult]):
+    """Print concise summary to terminal."""
 
-    # Header
-    h1 = (f"  {'Model':<12} │ {'Loss':>7} {'PPL':>7} │ "
-           f"{'EM':>7} {'F1':>7} {'ROUGE-L':>7} │ "
-           f"{'Loss':>7} {'PPL':>7} │ "
-           f"{'EM':>7} {'F1':>7} {'ROUGE-L':>7}")
-    h0 = (f"  {'':12} │ {'── Dev Set ──────────':^24} │ "
-           f"{'── Train Peek ─────────────':^24} │ "
-           f"{'':7}")
-    print(f"{DIM}{h0}{RESET}")
-    print(f"{BOLD}{h1}{RESET}")
-    print(f"  {'─'*12}─┼─{'─'*23}─┼─{'─'*23}─┼─{'─'*23}")
+    # ── Comparison table ──
+    print(f"\n{'=' * W}")
+    print(f"  {BOLD}COMPARISON TABLE{RESET}")
+    print(f"{'=' * W}")
 
-    # Find best values for highlighting
-    best_dev_f1 = max((r.dev_f1 for r in results), default=0)
-    best_dev_em = max((r.dev_em for r in results), default=0)
+    # Sub-header
+    print(f"  {'':12}  {'─── Dev Set ───────────────────':^33}  "
+          f"{'─── Train Peek ────────────────':^33}")
+    header = (f"  {'Model':<12}  {'Loss':>6} {'PPL':>7} "
+              f"{'EM':>7} {'F1':>7} {'RL':>7} {'Empty':>6}  "
+              f"{'Loss':>6} {'PPL':>7} "
+              f"{'EM':>7} {'F1':>7} {'RL':>7} {'Empty':>6}")
+    print(f"{BOLD}{header}{RESET}")
+    print(f"  {'─' * (W - 4)}")
+
+    best_f1 = max((r.dev_f1 for r in results), default=0)
+    best_em = max((r.dev_em for r in results), default=0)
 
     for r in results:
         name = f"Q={r.q_value}"
+        # Highlight best
+        em_s = f"{r.dev_em:>6.2%}"
+        f1_s = f"{r.dev_f1:>7.4f}"
+        if r.dev_f1 == best_f1 and len(results) > 1:
+            f1_s = f"{GREEN}{f1_s}{RESET}"
+        if r.dev_em == best_em and len(results) > 1:
+            em_s = f"{GREEN}{em_s}{RESET}"
 
-        # Highlight best model
-        em_str = f"{r.dev_em:>6.2%}"
-        f1_str = f"{r.dev_f1:>7.4f}"
-        if r.dev_f1 == best_dev_f1:
-            f1_str = f"{GREEN}{f1_str}{RESET}"
-        if r.dev_em == best_dev_em:
-            em_str = f"{GREEN}{em_str}{RESET}"
+        de = f"{r.dev_empty_preds}" if r.dev_n > 0 else "-"
+        te = f"{r.train_empty_preds}" if r.train_n > 0 else "-"
 
-        row = (f"  {name:<12} │ {r.dev_loss:>7.4f} {r.dev_ppl:>7.2f} │ "
-               f"{em_str} {f1_str} {r.dev_rouge_l:>7.4f} │ "
-               f"{r.train_loss:>7.4f} {r.train_ppl:>7.2f} │ "
-               f"{r.train_em:>6.2%} {r.train_f1:>7.4f} {r.train_rouge_l:>7.4f}")
-        print(row)
+        print(f"  {name:<12}  {r.dev_loss:>6.3f} {r.dev_ppl:>7.2f} "
+              f"{em_s} {f1_s} {r.dev_rouge_l:>7.4f} {de:>6}  "
+              f"{r.train_loss:>6.3f} {r.train_ppl:>7.2f} "
+              f"{r.train_em:>6.2%} {r.train_f1:>7.4f} {r.train_rouge_l:>7.4f} {te:>6}")
 
-    print(f"  {'─'*12}─┴─{'─'*23}─┴─{'─'*23}─┴─{'─'*23}")
+    print(f"  {'─' * (W - 4)}")
 
-    # Overfitting indicator
-    print()
-    print(f"  {BOLD}Overfitting Analysis:{RESET}")
+    # ── Overfitting analysis ──
+    print(f"\n  {BOLD}Overfitting (train_F1 - dev_F1):{RESET}")
     for r in results:
-        gap = r.train_f1 - r.dev_f1
-        if gap > 0.1:
-            indicator = f"{RED}HIGH{RESET} (gap={gap:.4f})"
-        elif gap > 0.05:
-            indicator = f"{YELLOW}MODERATE{RESET} (gap={gap:.4f})"
-        else:
-            indicator = f"{GREEN}LOW{RESET} (gap={gap:.4f})"
-        print(f"    Q={r.q_value:<5}  train_F1 - dev_F1 = {gap:+.4f}  → {indicator}")
-    print()
-
-
-def print_bar_chart(results: List[ModelResult]):
-    """Print a visual bar chart of key metrics."""
-    print(section("VISUAL COMPARISON"))
-    print()
-
-    max_f1 = max((r.dev_f1 for r in results), default=0.001)
-    max_em = max((r.dev_em for r in results), default=0.001)
-
-    print(f"  {BOLD}Dev F1 Score:{RESET}")
-    for r in results:
-        b = bar(r.dev_f1, max_f1, width=40)
-        print(f"    Q={r.q_value:<5} {CYAN}{b}{RESET} {r.dev_f1:.4f}")
-    print()
-
-    print(f"  {BOLD}Dev Exact Match:{RESET}")
-    for r in results:
-        b = bar(r.dev_em, max_em, width=40)
-        print(f"    Q={r.q_value:<5} {MAGENTA}{b}{RESET} {r.dev_em:.2%}")
-    print()
-
-    print(f"  {BOLD}Dev Perplexity (lower is better):{RESET}")
-    max_ppl = max((r.dev_ppl for r in results), default=1.0)
-    for r in results:
-        b = bar(r.dev_ppl, max_ppl, width=40)
-        print(f"    Q={r.q_value:<5} {YELLOW}{b}{RESET} {r.dev_ppl:.2f}")
-    print()
-
-
-def print_model_samples(r: ModelResult, top_n: int = 10):
-    """Print best and worst samples for a single model."""
-    dev_samples = [s for s in r.samples if s.source == "dev"]
-    train_samples = [s for s in r.samples if s.source == "train"]
-
-    print(section(f"Q={r.q_value}  |  Dev EM={r.dev_em:.2%}  F1={r.dev_f1:.4f}  PPL={r.dev_ppl:.2f}"))
-    print(f"  {DIM}checkpoint: {r.checkpoint_path}{RESET}")
-    print(f"  {DIM}config:     {r.config_path}{RESET}")
-    print()
-
-    for label, sample_list in [("DEV SET", dev_samples), ("TRAIN SET (peek)", train_samples)]:
-        if not sample_list:
+        if r.train_n == 0:
             continue
+        gap = r.train_f1 - r.dev_f1
+        if gap > 0.10:
+            tag = f"{RED}HIGH{RESET}"
+        elif gap > 0.05:
+            tag = f"{YELLOW}MODERATE{RESET}"
+        else:
+            tag = f"{GREEN}LOW{RESET}"
+        print(f"    Q={r.q_value:<5}  gap = {gap:+.4f}  {tag}")
 
-        sorted_best = sorted(sample_list, key=lambda s: s.f1, reverse=True)
+    # ── Bar charts ──
+    print(f"\n  {BOLD}Dev F1:{RESET}")
+    max_f1 = max((r.dev_f1 for r in results), default=0.001)
+    for r in results:
+        b = bar(r.dev_f1, max_f1, 35)
+        print(f"    Q={r.q_value:<5} {CYAN}{b}{RESET} {r.dev_f1:.4f}")
 
-        # ── Best N ──
-        best = sorted_best[:top_n]
-        print(f"  {GREEN}{BOLD}▲ BEST {len(best)} samples ({label}){RESET}")
-        print(f"  {hline()}")
-        for rank, s in enumerate(best, 1):
-            _print_single_sample(rank, s)
+    print(f"\n  {BOLD}Dev EM:{RESET}")
+    max_em = max((r.dev_em for r in results), default=0.001)
+    for r in results:
+        b = bar(r.dev_em, max_em, 35)
+        print(f"    Q={r.q_value:<5} {MAGENTA}{b}{RESET} {r.dev_em:.2%}")
 
-        # ── Worst N ──
-        worst = sorted_best[-top_n:]
-        worst.reverse()  # worst first
-        print()
-        print(f"  {RED}{BOLD}▼ WORST {len(worst)} samples ({label}){RESET}")
-        print(f"  {hline()}")
-        for rank, s in enumerate(worst, 1):
-            _print_single_sample(rank, s)
+    print(f"\n  {BOLD}Dev PPL (lower=better):{RESET}")
+    max_ppl = max((r.dev_ppl for r in results), default=1)
+    for r in results:
+        b = bar(r.dev_ppl, max_ppl, 35)
+        print(f"    Q={r.q_value:<5} {YELLOW}{b}{RESET} {r.dev_ppl:.2f}")
 
-        print()
-
-
-def _print_single_sample(rank: int, s: SampleResult):
-    """Print one sample with formatting."""
-    # Color code by quality
-    if s.f1 >= 0.8:
-        color = GREEN
-    elif s.f1 >= 0.3:
-        color = YELLOW
-    else:
-        color = RED
-
-    em_icon = "✓" if s.em == 1.0 else "✗"
-    em_color = GREEN if s.em == 1.0 else RED
-
-    print(f"  {DIM}#{rank:<3}{RESET} "
-          f"{em_color}{em_icon}{RESET} "
-          f"EM={s.em:.0f}  {color}F1={s.f1:.4f}{RESET}  ROUGE-L={s.rouge_l:.4f}")
-
-    # Truncate long texts for readability
-    q_disp = s.question[:100] + ("..." if len(s.question) > 100 else "")
-    g_disp = s.gold[:120] + ("..." if len(s.gold) > 120 else "")
-    p_disp = s.prediction[:120] + ("..." if len(s.prediction) > 120 else "")
-    c_disp = s.context_preview[:100] + ("..." if len(s.context_preview) > 100 else "")
-
-    print(f"       {DIM}Context:{RESET} {c_disp}")
-    print(f"       {BOLD}Q:{RESET} {q_disp}")
-    print(f"       {GREEN}Gold:{RESET} {g_disp}")
-    print(f"       {CYAN}Pred:{RESET} {p_disp}")
-    print(f"  {DIM}{hline('·')}{RESET}")
-
-
-def print_summary_ranking(results: List[ModelResult]):
-    """Print a final one-line-per-model ranking."""
-    print(section("FINAL RANKING (by Dev F1)"))
-    print()
+    # ── Ranking ──
+    print(f"\n{'=' * W}")
+    print(f"  {BOLD}RANKING (by Dev F1){RESET}")
+    print(f"{'=' * W}")
     ranked = sorted(results, key=lambda r: r.dev_f1, reverse=True)
-    for i, r in enumerate(ranked, 1):
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"  {i}.")
-        print(f"  {medal}  Q={r.q_value:<5}  "
+    medals = {0: "1.", 1: "2.", 2: "3."}
+    for i, r in enumerate(ranked):
+        m = medals.get(i, f"{i+1}.")
+        print(f"  {m:<4} Q={r.q_value:<5}  "
               f"F1={r.dev_f1:.4f}  EM={r.dev_em:.2%}  "
               f"PPL={r.dev_ppl:.2f}  Loss={r.dev_loss:.4f}  "
-              f"(n={r.dev_n})")
-    print()
+              f"({r.dev_n} samples)")
+    print(f"{'=' * W}\n")
+
+
+# ── Markdown report ──────────────────────────────────────────────────────────
+
+
+def write_markdown_report(results: List[ModelResult], report_path: str,
+                          top_n: int = 10, args=None):
+    """Write full per-sample analysis to a markdown file."""
+    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"# Deep Compressor QA Evaluation Report\n\n")
+        f.write(f"Generated: {ts}\n\n")
+
+        # Config
+        if args:
+            f.write("## Evaluation Config\n\n")
+            f.write(f"| Parameter | Value |\n|---|---|\n")
+            f.write(f"| Dev data | `{args.eval_data}` |\n")
+            f.write(f"| Train data | `{args.train_data}` |\n")
+            f.write(f"| Max dev samples | {args.max_eval_samples if args.max_eval_samples > 0 else 'ALL'} |\n")
+            f.write(f"| Train peek samples | {args.train_peek_samples} |\n")
+            f.write(f"| Models evaluated | {len(results)} |\n\n")
+
+        # ── Summary table ──
+        f.write("## Summary\n\n")
+        f.write("### Dev Set\n\n")
+        f.write("| Model | Loss | PPL | EM | F1 | ROUGE-L | Empty Preds | N |\n")
+        f.write("|-------|------|-----|----|----|---------|-------------|---|\n")
+        for r in results:
+            f.write(f"| Q={r.q_value} | {r.dev_loss:.4f} | {r.dev_ppl:.2f} | "
+                    f"{r.dev_em:.2%} | {r.dev_f1:.4f} | {r.dev_rouge_l:.4f} | "
+                    f"{r.dev_empty_preds} ({100*r.dev_empty_preds/max(r.dev_n,1):.1f}%) | "
+                    f"{r.dev_n} |\n")
+
+        if any(r.train_n > 0 for r in results):
+            f.write("\n### Train Peek\n\n")
+            f.write("| Model | Loss | PPL | EM | F1 | ROUGE-L | Empty Preds | N |\n")
+            f.write("|-------|------|-----|----|----|---------|-------------|---|\n")
+            for r in results:
+                if r.train_n == 0:
+                    continue
+                f.write(f"| Q={r.q_value} | {r.train_loss:.4f} | {r.train_ppl:.2f} | "
+                        f"{r.train_em:.2%} | {r.train_f1:.4f} | {r.train_rouge_l:.4f} | "
+                        f"{r.train_empty_preds} ({100*r.train_empty_preds/max(r.train_n,1):.1f}%) | "
+                        f"{r.train_n} |\n")
+
+        # ── Overfitting ──
+        if any(r.train_n > 0 for r in results):
+            f.write("\n### Overfitting Analysis\n\n")
+            f.write("| Model | Dev F1 | Train F1 | Gap | Level |\n")
+            f.write("|-------|--------|----------|-----|-------|\n")
+            for r in results:
+                if r.train_n == 0:
+                    continue
+                gap = r.train_f1 - r.dev_f1
+                level = "HIGH" if gap > 0.10 else ("MODERATE" if gap > 0.05 else "LOW")
+                f.write(f"| Q={r.q_value} | {r.dev_f1:.4f} | {r.train_f1:.4f} | "
+                        f"{gap:+.4f} | {level} |\n")
+
+        # ── Per-model sample details ──
+        ranked = sorted(results, key=lambda r: r.dev_f1, reverse=True)
+        for r in ranked:
+            f.write(f"\n---\n\n## Q={r.q_value}\n\n")
+            f.write(f"- **Checkpoint**: `{r.checkpoint_path}`\n")
+            f.write(f"- **Config**: `{r.config_path}`\n")
+            f.write(f"- **Dev**: Loss={r.dev_loss:.4f}  PPL={r.dev_ppl:.2f}  "
+                    f"EM={r.dev_em:.2%}  F1={r.dev_f1:.4f}  ROUGE-L={r.dev_rouge_l:.4f}\n")
+            if r.train_n > 0:
+                f.write(f"- **Train**: Loss={r.train_loss:.4f}  PPL={r.train_ppl:.2f}  "
+                        f"EM={r.train_em:.2%}  F1={r.train_f1:.4f}  ROUGE-L={r.train_rouge_l:.4f}\n")
+            f.write(f"- **Empty predictions**: dev={r.dev_empty_preds}/{r.dev_n}")
+            if r.train_n > 0:
+                f.write(f", train={r.train_empty_preds}/{r.train_n}")
+            f.write("\n\n")
+
+            for source_label in ["dev", "train"]:
+                source_samples = [s for s in r.samples if s.source == source_label]
+                if not source_samples:
+                    continue
+
+                tag = "Dev Set" if source_label == "dev" else "Train Set (peek)"
+                sorted_by_f1 = sorted(source_samples, key=lambda s: s.f1, reverse=True)
+
+                # Best N
+                best = sorted_by_f1[:top_n]
+                f.write(f"### Best {len(best)} — {tag}\n\n")
+                _write_sample_table(f, best)
+
+                # Worst N
+                worst = sorted_by_f1[-top_n:]
+                worst.reverse()
+                f.write(f"### Worst {len(worst)} — {tag}\n\n")
+                _write_sample_table(f, worst)
+
+                # Empty predictions (if any)
+                empty = [s for s in source_samples if not s.prediction.strip()]
+                if empty:
+                    shown = empty[:5]
+                    f.write(f"### Empty Predictions ({len(empty)} total) — {tag}\n\n")
+                    _write_sample_table(f, shown)
+
+    logger.info(f"Markdown report saved to {report_path}")
+
+
+def _write_sample_table(f, samples: List[SampleResult]):
+    """Write a list of samples as a readable markdown section."""
+    for i, s in enumerate(samples, 1):
+        em_icon = "\u2705" if s.em == 1.0 else "\u274c"
+        f.write(f"**#{i}** {em_icon} EM={s.em:.0f} | F1={s.f1:.4f} | ROUGE-L={s.rouge_l:.4f}\n\n")
+        # Use blockquote for context
+        ctx = s.context_preview[:200].replace("\n", " ")
+        f.write(f"> **Context**: {ctx}...\n\n")
+        f.write(f"- **Question**: {s.question}\n")
+        f.write(f"- **Gold**: {s.gold}\n")
+        pred_display = s.prediction if s.prediction.strip() else "*(empty)*"
+        f.write(f"- **Prediction**: {pred_display}\n\n")
+    f.write("\n")
 
 
 # ── CSV export ───────────────────────────────────────────────────────────────
@@ -471,8 +486,10 @@ def save_csv(results: List[ModelResult], output_path: str):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "model", "q_value", "checkpoint",
-        "dev_loss", "dev_ppl", "dev_em", "dev_f1", "dev_rouge_l", "dev_n",
-        "train_loss", "train_ppl", "train_em", "train_f1", "train_rouge_l", "train_n",
+        "dev_loss", "dev_ppl", "dev_em", "dev_f1", "dev_rouge_l",
+        "dev_empty_preds", "dev_n",
+        "train_loss", "train_ppl", "train_em", "train_f1", "train_rouge_l",
+        "train_empty_preds", "train_n",
     ]
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -486,15 +503,17 @@ def save_csv(results: List[ModelResult], output_path: str):
                 "dev_em": f"{r.dev_em:.6f}",
                 "dev_f1": f"{r.dev_f1:.6f}",
                 "dev_rouge_l": f"{r.dev_rouge_l:.6f}",
+                "dev_empty_preds": r.dev_empty_preds,
                 "dev_n": r.dev_n,
                 "train_loss": f"{r.train_loss:.6f}",
                 "train_ppl": f"{r.train_ppl:.4f}",
                 "train_em": f"{r.train_em:.6f}",
                 "train_f1": f"{r.train_f1:.6f}",
                 "train_rouge_l": f"{r.train_rouge_l:.6f}",
+                "train_empty_preds": r.train_empty_preds,
                 "train_n": r.train_n,
             })
-    logger.info(f"Results saved to {output_path}")
+    logger.info(f"CSV saved to {output_path}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -502,38 +521,37 @@ def save_csv(results: List[ModelResult], output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed QA evaluation across all experiments",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+        description="Detailed QA evaluation across all experiments")
     parser.add_argument("--eval_data", type=str,
                         default="data/qa_large_dev.json",
-                        help="Path to held-out dev set (default: data/qa_large_dev.json)")
+                        help="Held-out dev set (default: data/qa_large_dev.json)")
     parser.add_argument("--train_data", type=str,
                         default="data/qa_large_train.json",
-                        help="Path to training set for peek (default: data/qa_large_train.json)")
+                        help="Training set for peek (default: data/qa_large_train.json)")
     parser.add_argument("--max_eval_samples", type=int, default=500,
-                        help="Max dev samples to evaluate (0=all, default=500)")
+                        help="Max dev samples (0=all, default=500)")
     parser.add_argument("--train_peek_samples", type=int, default=100,
-                        help="Number of training samples to peek at (default=100)")
+                        help="Training samples to peek (default=100)")
     parser.add_argument("--checkpoints", type=str, default=None,
                         help="Comma-separated checkpoint dirs (default: auto-discover)")
     parser.add_argument("--outputs_dir", type=str, default="outputs",
-                        help="Base outputs directory (default: outputs)")
+                        help="Base outputs dir (default: outputs)")
     parser.add_argument("--top_n", type=int, default=10,
-                        help="Number of best/worst samples to show per model (default=10)")
+                        help="Best/worst samples per model in report (default=10)")
     parser.add_argument("--batch_size", type=int, default=0,
                         help="Override batch size (0=use config default)")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Save aggregate results to CSV")
+    parser.add_argument("--report", type=str, default="results/qa_eval_report.md",
+                        help="Markdown report path (default: results/qa_eval_report.md)")
+    parser.add_argument("--csv", type=str, default=None,
+                        help="Also save CSV summary")
     args = parser.parse_args()
 
-    # ── Discover checkpoints ──────────────────────────────────────────────
+    # ── Discover checkpoints ──
     if args.checkpoints:
         entries = []
         for p in args.checkpoints.split(","):
             p = p.strip()
             exp_dir = Path(p)
-            # If user gave the experiment dir, find the checkpoint subdir
             if (exp_dir / "checkpoint-best" / "trainable_weights.pt").exists():
                 ckpt_dir = exp_dir / "checkpoint-best"
             elif (exp_dir / "checkpoint-final" / "trainable_weights.pt").exists():
@@ -541,7 +559,7 @@ def main():
             elif (exp_dir / "trainable_weights.pt").exists():
                 ckpt_dir = exp_dir
             else:
-                logger.warning(f"No checkpoint found in {p}, skipping")
+                logger.warning(f"No checkpoint in {p}, skipping")
                 continue
             name = exp_dir.name
             config_path = Path("configs") / f"{name}.yaml"
@@ -559,54 +577,51 @@ def main():
         logger.error("No checkpoints found. Train some models first.")
         return
 
-    # ── Initialize ────────────────────────────────────────────────────────
+    # ── Initialize ──
     accelerator = Accelerator()
     is_main = accelerator.is_main_process
 
     if is_main:
-        print(section("DEEP COMPRESSOR — DETAILED QA EVALUATION"))
-        print(f"  Checkpoints found: {len(entries)}")
-        for ckpt, cfg, q in entries:
-            print(f"    Q={q:<5}  {ckpt}")
-        print(f"  Dev data:       {args.eval_data}")
-        print(f"  Train data:     {args.train_data}")
-        print(f"  Dev samples:    {args.max_eval_samples if args.max_eval_samples > 0 else 'ALL'}")
-        print(f"  Train peek:     {args.train_peek_samples}")
-        print(f"  Device:         {accelerator.device}")
-        print(f"  Processes:      {accelerator.num_processes}")
+        print(f"\n{'=' * W}")
+        print(f"  {BOLD}DEEP COMPRESSOR — QA EVALUATION{RESET}")
+        print(f"{'=' * W}")
+        print(f"  Models:      {len(entries)}  ({', '.join(f'Q={q}' for _, _, q in entries)})")
+        print(f"  Dev data:    {args.eval_data}")
+        print(f"  Dev samples: {args.max_eval_samples if args.max_eval_samples > 0 else 'ALL'}")
+        print(f"  Train peek:  {args.train_peek_samples}")
+        print(f"  Report:      {args.report}")
+        print(f"  Device:      {accelerator.device}")
         print()
 
-    # ── Load tokenizer (shared) ───────────────────────────────────────────
+    # ── Load tokenizer ──
     tokenizer = AutoTokenizer.from_pretrained(
         "models/Qwen3-0.6B", trust_remote_code=True, fix_mistral_regex=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── Evaluate each model ───────────────────────────────────────────────
+    # ── Evaluate each model ──
     all_results: List[ModelResult] = []
 
     for ckpt_dir, config_path, q_value in entries:
         if is_main:
-            print(section(f"Evaluating Q={q_value}"))
+            print(f"{'─' * W}")
+            print(f"  {BOLD}Q={q_value}{RESET}  ({ckpt_dir})")
 
-        # Load model
         model, config = load_model(ckpt_dir, config_path, accelerator)
         bs = args.batch_size if args.batch_size > 0 else config.training.batch_size
-        max_ans_tokens = config.qwen.max_answer_tokens
+        max_ans = config.qwen.max_answer_tokens
         collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
-        num_workers = 0 if accelerator.device.type == "mps" else 2
-        pin_memory = accelerator.device.type == "cuda"
+        nw = 0 if accelerator.device.type == "mps" else 2
+        pin = accelerator.device.type == "cuda"
 
         mr = ModelResult(
-            name=f"Q={q_value}",
-            q_value=q_value,
-            config_path=str(config_path),
-            checkpoint_path=str(ckpt_dir),
+            name=f"Q={q_value}", q_value=q_value,
+            config_path=str(config_path), checkpoint_path=str(ckpt_dir),
         )
 
-        # ── Dev set evaluation ────────────────────────────────────────
+        # Dev
         if is_main:
-            print(f"  Loading dev data: {args.eval_data}")
+            print(f"  Loading dev data...")
         dev_ds = QADataset(
             args.eval_data, tokenizer,
             max_doc_tokens=config.qwen.max_doc_tokens,
@@ -615,36 +630,31 @@ def main():
         )
         if args.max_eval_samples > 0 and args.max_eval_samples < len(dev_ds):
             dev_ds = Subset(dev_ds, list(range(args.max_eval_samples)))
-        if is_main:
-            print(f"  Dev samples: {len(dev_ds)}")
 
         dev_loader = DataLoader(dev_ds, batch_size=bs, shuffle=False,
-                                collate_fn=collator, num_workers=num_workers,
-                                pin_memory=pin_memory)
+                                collate_fn=collator, num_workers=nw, pin_memory=pin)
         dev_loader = accelerator.prepare(dev_loader)
 
-        dev_metrics, dev_samples = evaluate_qa_detailed(
+        dev_m, dev_s = evaluate_qa_detailed(
             model, dev_loader, tokenizer, accelerator,
-            max_new_tokens=max_ans_tokens, source_label="dev")
+            max_new_tokens=max_ans, source_label="dev")
 
-        mr.dev_loss = dev_metrics["loss"]
-        mr.dev_ppl = dev_metrics["perplexity"]
-        mr.dev_em = dev_metrics["exact_match"]
-        mr.dev_f1 = dev_metrics["f1"]
-        mr.dev_rouge_l = dev_metrics["rouge_l"]
-        mr.dev_n = dev_metrics["n_samples"]
-        mr.samples.extend(dev_samples)
+        mr.dev_loss = dev_m["loss"]
+        mr.dev_ppl = dev_m["perplexity"]
+        mr.dev_em = dev_m["exact_match"]
+        mr.dev_f1 = dev_m["f1"]
+        mr.dev_rouge_l = dev_m["rouge_l"]
+        mr.dev_n = dev_m["n_samples"]
+        mr.dev_empty_preds = dev_m["empty_preds"]
+        mr.samples.extend(dev_s)
 
         if is_main:
-            print(f"  {GREEN}Dev results:{RESET}  "
-                  f"Loss={mr.dev_loss:.4f}  PPL={mr.dev_ppl:.2f}  "
+            print(f"  {GREEN}Dev:{RESET}   Loss={mr.dev_loss:.4f}  PPL={mr.dev_ppl:.2f}  "
                   f"EM={mr.dev_em:.2%}  F1={mr.dev_f1:.4f}  "
-                  f"ROUGE-L={mr.dev_rouge_l:.4f}")
+                  f"Empty={mr.dev_empty_preds}/{mr.dev_n}")
 
-        # ── Train peek evaluation ─────────────────────────────────────
+        # Train peek
         if args.train_peek_samples > 0 and os.path.exists(args.train_data):
-            if is_main:
-                print(f"  Loading train peek: {args.train_data}")
             train_ds = QADataset(
                 args.train_data, tokenizer,
                 max_doc_tokens=config.qwen.max_doc_tokens,
@@ -653,64 +663,50 @@ def main():
             )
             if args.train_peek_samples < len(train_ds):
                 train_ds = Subset(train_ds, list(range(args.train_peek_samples)))
-            if is_main:
-                print(f"  Train peek samples: {len(train_ds)}")
 
             train_loader = DataLoader(train_ds, batch_size=bs, shuffle=False,
-                                      collate_fn=collator, num_workers=num_workers,
-                                      pin_memory=pin_memory)
+                                      collate_fn=collator, num_workers=nw, pin_memory=pin)
             train_loader = accelerator.prepare(train_loader)
 
-            train_metrics, train_samples = evaluate_qa_detailed(
+            tr_m, tr_s = evaluate_qa_detailed(
                 model, train_loader, tokenizer, accelerator,
-                max_new_tokens=max_ans_tokens, source_label="train")
+                max_new_tokens=max_ans, source_label="train")
 
-            mr.train_loss = train_metrics["loss"]
-            mr.train_ppl = train_metrics["perplexity"]
-            mr.train_em = train_metrics["exact_match"]
-            mr.train_f1 = train_metrics["f1"]
-            mr.train_rouge_l = train_metrics["rouge_l"]
-            mr.train_n = train_metrics["n_samples"]
-            mr.samples.extend(train_samples)
+            mr.train_loss = tr_m["loss"]
+            mr.train_ppl = tr_m["perplexity"]
+            mr.train_em = tr_m["exact_match"]
+            mr.train_f1 = tr_m["f1"]
+            mr.train_rouge_l = tr_m["rouge_l"]
+            mr.train_n = tr_m["n_samples"]
+            mr.train_empty_preds = tr_m["empty_preds"]
+            mr.samples.extend(tr_s)
 
             if is_main:
-                print(f"  {YELLOW}Train results:{RESET} "
-                      f"Loss={mr.train_loss:.4f}  PPL={mr.train_ppl:.2f}  "
+                print(f"  {YELLOW}Train:{RESET} Loss={mr.train_loss:.4f}  PPL={mr.train_ppl:.2f}  "
                       f"EM={mr.train_em:.2%}  F1={mr.train_f1:.4f}  "
-                      f"ROUGE-L={mr.train_rouge_l:.4f}")
+                      f"Empty={mr.train_empty_preds}/{mr.train_n}")
 
         all_results.append(mr)
-
-        # Free model memory before loading next
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # ── Print all outputs (main process only) ─────────────────────────────
+    # ── Output (main process only) ──
     if not is_main:
         return
 
-    print("\n" * 2)
-    print("━" * W)
-    print(f"{'':>{W//2-10}}{BOLD}EVALUATION COMPLETE{RESET}")
-    print("━" * W)
+    # Terminal: summary only
+    print_summary(all_results)
 
-    # 1. Comparison table
-    print_comparison_table(all_results)
+    # File: full report
+    write_markdown_report(all_results, args.report, top_n=args.top_n, args=args)
+    print(f"  Report saved to: {BOLD}{args.report}{RESET}")
 
-    # 2. Bar charts
-    print_bar_chart(all_results)
+    if args.csv:
+        save_csv(all_results, args.csv)
+        print(f"  CSV saved to:    {BOLD}{args.csv}{RESET}")
 
-    # 3. Per-model samples (best/worst)
-    for r in sorted(all_results, key=lambda x: x.dev_f1, reverse=True):
-        print_model_samples(r, top_n=args.top_n)
-
-    # 4. Final ranking
-    print_summary_ranking(all_results)
-
-    # 5. CSV export
-    if args.output:
-        save_csv(all_results, args.output)
+    print()
 
 
 if __name__ == "__main__":
