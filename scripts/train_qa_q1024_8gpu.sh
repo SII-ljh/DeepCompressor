@@ -1,10 +1,10 @@
 #!/bin/bash
-# Training script for Q=1024 with 8 GPUs (Compression ratio 4:1, 3 epochs)
+# Training script for Q=1024 with 8 GPUs (Compression ratio 4:1, early stopping)
 
 set -e  # Exit on error
 
 echo "========================================================================"
-echo "Deep Compressor QA Training - Q=1024 (Compression 4:1, 8 GPUs, 3 epochs)"
+echo "Deep Compressor QA Training - Q=1024 (Compression 4:1, 8 GPUs, early stopping)"
 echo "========================================================================"
 echo "Start time: $(date)"
 echo ""
@@ -34,9 +34,8 @@ fi
 BATCH_SIZE=10           # Per GPU (reduced from 16 due to larger Q)
 GRAD_ACCUM=2            # Gradient accumulation steps
 # Effective batch size = 8 GPUs × 10 batch × 2 accum = 160
-# steps/epoch = 484K / 160 ≈ 3024, 3 epochs = 9072
-MAX_STEPS=9072
-WARMUP_STEPS=454
+MAX_STEPS=10000
+WARMUP_STEPS=500
 LEARNING_RATE=1e-4
 EVAL_EVERY=756
 SAVE_EVERY=3024
@@ -47,7 +46,7 @@ echo "  GPUs:                 8"
 echo "  Batch size (per GPU): $BATCH_SIZE"
 echo "  Gradient accum:       $GRAD_ACCUM"
 echo "  Effective batch:      $((8 * BATCH_SIZE * GRAD_ACCUM))"
-echo "  Max steps:            $MAX_STEPS (3 epochs)"
+echo "  Max steps:            $MAX_STEPS (early stopping patience=5)"
 echo "  Learning rate:        $LEARNING_RATE"
 echo "  Output dir:           $OUTPUT_DIR"
 echo ""

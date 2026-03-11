@@ -239,6 +239,7 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
     micro_steps = 0
     last_metrics = None
     best_metric = float("inf")  # track best eval loss for saving best checkpoint
+    patience_counter = 0  # early stopping counter
 
     while completed_steps < tcfg.max_steps:
         for batch in train_loader:
@@ -362,6 +363,7 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                     eval_loss = metrics.get("loss", float("inf"))
                     if eval_loss < best_metric:
                         best_metric = eval_loss
+                        patience_counter = 0
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
                             save_checkpoint(model, accelerator,
@@ -369,6 +371,21 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                             logger.info(
                                 f"New best eval loss: {eval_loss:.4f} "
                                 f"at step {completed_steps}")
+                    else:
+                        patience_counter += 1
+                        if accelerator.is_main_process:
+                            logger.info(
+                                f"No improvement for {patience_counter} eval(s) "
+                                f"(best={best_metric:.4f}, current={eval_loss:.4f})")
+
+                    # Early stopping
+                    if (tcfg.early_stopping_patience > 0
+                            and patience_counter >= tcfg.early_stopping_patience):
+                        if accelerator.is_main_process:
+                            logger.info(
+                                f"Early stopping triggered at step {completed_steps} "
+                                f"(patience={tcfg.early_stopping_patience})")
+                        return model, last_metrics
 
                     model.train()
 

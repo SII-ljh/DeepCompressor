@@ -34,8 +34,9 @@ training:
   learning_rate: 0.0001
   batch_size: 20
   gradient_accumulation_steps: 2
-  max_steps: 4536
-  warmup_steps: 227
+  max_steps: 10000
+  warmup_steps: 500
+  early_stopping_patience: 5
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine

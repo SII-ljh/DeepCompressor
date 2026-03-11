@@ -90,6 +90,7 @@ class TrainingConfig:
     output_dir: str = "outputs"
     gradient_checkpointing: bool = False
     mixed_precision: str = "no"  # "no", "fp16", "bf16"
+    early_stopping_patience: int = 0  # 0 = disabled; N = stop after N evals with no improvement
 
 
 @dataclass

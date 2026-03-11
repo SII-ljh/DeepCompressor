@@ -34,8 +34,9 @@ training:
   learning_rate: 0.0001
   batch_size: 16  # ← 从20降到16（Q增大，显存占用增加）
   gradient_accumulation_steps: 2
-  max_steps: 5670
-  warmup_steps: 284
+  max_steps: 10000
+  warmup_steps: 500
+  early_stopping_patience: 5
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
