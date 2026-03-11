@@ -65,7 +65,6 @@ accelerate launch \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
     --max_eval_samples 5000 \
-    --stage 2 \
     2>&1 | tee "${OUTPUT_DIR}_training.log"
 
 EXIT_CODE=$?
