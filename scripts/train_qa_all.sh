@@ -1,9 +1,18 @@
 #!/bin/bash
-# Run all QA training experiments sequentially.
+# Run QA training experiments sequentially.
 # Each Q value runs independently — one failure won't stop the rest.
+#
+# Usage:
+#   bash scripts/train_qa_all.sh              # run all Q values
+#   bash scripts/train_qa_all.sh 64 256 1024  # run only specified Q values
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-Q_VALUES=(64 128 256 512 1024 2048)
+
+if [ $# -gt 0 ]; then
+    Q_VALUES=("$@")
+else
+    Q_VALUES=(64 128 256 512 1024 2048)
+fi
 
 declare -A RESULTS
 FAILED=0
