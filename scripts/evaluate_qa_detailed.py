@@ -18,9 +18,9 @@ Usage:
     python scripts/evaluate_qa_detailed.py \
         --checkpoints outputs/qa_q256_8gpu,outputs/qa_q1024_8gpu
 
-    # Multi-GPU
-    accelerate launch --multi_gpu --num_processes 4 \
-        scripts/evaluate_qa_detailed.py --max_eval_samples 1000
+    # Multi-GPU (8-GPU parallel evaluation)
+    accelerate launch --multi_gpu --num_processes 8 \
+        scripts/evaluate_qa_detailed.py --max_eval_samples 0
 """
 
 import argparse
@@ -47,6 +47,7 @@ import torch
 if torch.cuda.is_available():
     torch.backends.cuda.enable_cudnn_sdp(False)
 from accelerate import Accelerator
+from accelerate.utils import gather_object
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -188,14 +189,13 @@ def load_model(checkpoint_dir: Path, config_path: Path,
 def evaluate_qa_detailed(
     model, eval_loader: DataLoader, tokenizer,
     accelerator: Accelerator, max_new_tokens: int = 64,
-    source_label: str = "dev",
+    source_label: str = "dev", total_samples: int = 0,
 ) -> Tuple[Dict[str, float], List[SampleResult]]:
     model.eval()
     unwrapped = accelerator.unwrap_model(model)
 
-    all_em, all_f1, all_rouge, all_loss = [], [], [], []
     samples = []
-    empty_count = 0
+    loss_per_sample = []
     global_idx = 0
 
     total_batches = len(eval_loader)
@@ -237,15 +237,10 @@ def evaluate_qa_detailed(
             batch["doc_input_ids"][:, :120], skip_special_tokens=True)
 
         for i, (pred, gold) in enumerate(zip(preds, golds)):
-            if not pred.strip():
-                empty_count += 1
             em = compute_exact_match(pred, gold)
             f1 = compute_f1(pred, gold)
             rl = compute_rouge_l(pred, gold)
-            all_em.append(em)
-            all_f1.append(f1)
-            all_rouge.append(rl)
-            all_loss.append(batch_loss)
+            loss_per_sample.append(batch_loss)
 
             q_text = questions[i] if isinstance(questions, list) and i < len(questions) else ""
             ctx = doc_previews[i] if i < len(doc_previews) else ""
@@ -259,18 +254,8 @@ def evaluate_qa_detailed(
     if accelerator.is_main_process:
         print()  # newline after progress
 
-    n = max(len(all_em), 1)
-    avg_loss = sum(all_loss) / max(len(all_loss), 1)
-    metrics = {
-        "loss": avg_loss,
-        "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
-        "exact_match": sum(all_em) / n,
-        "f1": sum(all_f1) / n,
-        "rouge_l": sum(all_rouge) / n,
-        "n_samples": len(all_em),
-        "empty_preds": empty_count,
-    }
-    return metrics, samples
+    return _gather_eval_results(accelerator, samples, loss_per_sample,
+                                total_samples)
 
 
 # ── Padding helpers for decoder-only generation ──────────────────────────────
@@ -353,6 +338,51 @@ def _build_right_padded(fields_ids: List[torch.Tensor],
     return out_ids, out_mask, out_labels
 
 
+# ── Multi-GPU result gathering ────────────────────────────────────────────────
+
+
+def _gather_eval_results(
+    accelerator: Accelerator,
+    samples: List[SampleResult],
+    loss_per_sample: List[float],
+    total_samples: int,
+) -> Tuple[Dict[str, float], List[SampleResult]]:
+    """Gather evaluation results from all processes and compute aggregated metrics.
+
+    When running multi-GPU evaluation via ``accelerate launch``, each process
+    evaluates a shard of the data.  This function collects per-sample results
+    from every process, trims DistributedSampler padding duplicates, and
+    computes global metrics over the full dataset.
+    """
+    if accelerator.num_processes > 1:
+        all_samples = gather_object(samples)
+        all_losses = gather_object(loss_per_sample)
+        # DistributedSampler pads the dataset to be evenly divisible across
+        # processes; trim to the actual dataset size.
+        all_samples = all_samples[:total_samples]
+        all_losses = all_losses[:total_samples]
+    else:
+        all_samples = samples
+        all_losses = loss_per_sample
+
+    for i, s in enumerate(all_samples):
+        s.idx = i
+
+    n = max(len(all_samples), 1)
+    empty_count = sum(1 for s in all_samples if not s.prediction.strip())
+    avg_loss = sum(all_losses) / max(len(all_losses), 1)
+    metrics = {
+        "loss": avg_loss,
+        "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
+        "exact_match": sum(s.em for s in all_samples) / n,
+        "f1": sum(s.f1 for s in all_samples) / n,
+        "rouge_l": sum(s.rouge_l for s in all_samples) / n,
+        "n_samples": len(all_samples),
+        "empty_preds": empty_count,
+    }
+    return metrics, all_samples
+
+
 # ── Baseline (raw Qwen) evaluation ───────────────────────────────────────────
 
 
@@ -375,7 +405,7 @@ def discover_baseline_models(models_dir: str = "models") -> List[Tuple[str, str]
 def evaluate_baseline_qa(
     qwen_model, eval_loader: DataLoader, tokenizer,
     accelerator: Accelerator, max_new_tokens: int = 64,
-    source_label: str = "dev",
+    source_label: str = "dev", total_samples: int = 0,
 ) -> Tuple[Dict[str, float], List[SampleResult]]:
     """Evaluate raw Qwen (no compression) on QA as upper bound.
 
@@ -384,9 +414,8 @@ def evaluate_baseline_qa(
     qwen_model.eval()
     unwrapped = accelerator.unwrap_model(qwen_model)
 
-    all_em, all_f1, all_rouge, all_loss = [], [], [], []
     samples = []
-    empty_count = 0
+    loss_per_sample = []
     global_idx = 0
 
     total_batches = len(eval_loader)
@@ -441,15 +470,10 @@ def evaluate_baseline_qa(
             doc_ids[:, :120], skip_special_tokens=True)
 
         for i, (pred, gold) in enumerate(zip(preds, golds)):
-            if not pred.strip():
-                empty_count += 1
             em = compute_exact_match(pred, gold)
             f1 = compute_f1(pred, gold)
             rl = compute_rouge_l(pred, gold)
-            all_em.append(em)
-            all_f1.append(f1)
-            all_rouge.append(rl)
-            all_loss.append(batch_loss)
+            loss_per_sample.append(batch_loss)
 
             q_text = questions[i] if isinstance(questions, list) and i < len(questions) else ""
             ctx = doc_previews[i] if i < len(doc_previews) else ""
@@ -463,18 +487,8 @@ def evaluate_baseline_qa(
     if accelerator.is_main_process:
         print()
 
-    n = max(len(all_em), 1)
-    avg_loss = sum(all_loss) / max(len(all_loss), 1)
-    metrics = {
-        "loss": avg_loss,
-        "perplexity": torch.exp(torch.tensor(avg_loss)).item(),
-        "exact_match": sum(all_em) / n,
-        "f1": sum(all_f1) / n,
-        "rouge_l": sum(all_rouge) / n,
-        "n_samples": len(all_em),
-        "empty_preds": empty_count,
-    }
-    return metrics, samples
+    return _gather_eval_results(accelerator, samples, loss_per_sample,
+                                total_samples)
 
 
 # ── Stdout: summary statistics ───────────────────────────────────────────────
@@ -829,6 +843,7 @@ def main():
         print(f"  Dev samples: {args.max_eval_samples if args.max_eval_samples > 0 else 'ALL'}")
         print(f"  Train peek:  {args.train_peek_samples}")
         print(f"  Report:      {args.report}")
+        print(f"  GPUs:        {accelerator.num_processes}")
         print(f"  Device:      {accelerator.device}")
         print()
 
@@ -898,7 +913,8 @@ def main():
 
             dev_m, dev_s = evaluate_baseline_qa(
                 qwen, dev_loader, tokenizer, accelerator,
-                max_new_tokens=max_ans, source_label="dev")
+                max_new_tokens=max_ans, source_label="dev",
+                total_samples=len(dev_ds))
 
             mr.dev_loss = dev_m["loss"]
             mr.dev_ppl = dev_m["perplexity"]
@@ -930,7 +946,8 @@ def main():
 
                 tr_m, tr_s = evaluate_baseline_qa(
                     qwen, train_loader, tokenizer, accelerator,
-                    max_new_tokens=max_ans, source_label="train")
+                    max_new_tokens=max_ans, source_label="train",
+                    total_samples=len(train_ds))
 
                 mr.train_loss = tr_m["loss"]
                 mr.train_ppl = tr_m["perplexity"]
@@ -987,7 +1004,8 @@ def main():
 
         dev_m, dev_s = evaluate_qa_detailed(
             model, dev_loader, tokenizer, accelerator,
-            max_new_tokens=max_ans, source_label="dev")
+            max_new_tokens=max_ans, source_label="dev",
+            total_samples=len(dev_ds))
 
         mr.dev_loss = dev_m["loss"]
         mr.dev_ppl = dev_m["perplexity"]
@@ -1020,7 +1038,8 @@ def main():
 
             tr_m, tr_s = evaluate_qa_detailed(
                 model, train_loader, tokenizer, accelerator,
-                max_new_tokens=max_ans, source_label="train")
+                max_new_tokens=max_ans, source_label="train",
+                total_samples=len(train_ds))
 
             mr.train_loss = tr_m["loss"]
             mr.train_ppl = tr_m["perplexity"]
