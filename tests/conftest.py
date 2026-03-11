@@ -39,7 +39,7 @@ def tiny_config():
         ),
         projection=ProjectionConfig(down_hidden=48, up_hidden=48, dropout=0.0),
         loss=LossConfig(hidden_distill_layers=[1, 3]),
-        training=TrainingConfig(stage=1, batch_size=2),
+        training=TrainingConfig(batch_size=2),
     )
 
 

@@ -51,7 +51,6 @@ loss:
   hidden_mse_weight: 0.1
 
 training:
-  stage: 2
   learning_rate: 5.0e-5
   batch_size: 2                  # ← Reduced from 4 (longer docs need more memory)
   gradient_accumulation_steps: 4 # ← Increased from 2 (keep effective batch=64)
@@ -65,7 +64,6 @@ training:
   eval_every: 1000               # ← Less frequent (eval is expensive on long docs)
   save_every: 2000
   output_dir: outputs/h200_stage2_long
-  ntp_segment_len: 256
   gradient_checkpointing: true   # ← Critical for long sequences
   mixed_precision: "bf16"        # ← Critical for memory efficiency
 

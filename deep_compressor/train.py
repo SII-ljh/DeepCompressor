@@ -10,24 +10,18 @@ Supports:
   - Optuna hyperparameter search callback
 
 Usage:
-  # ── Legacy mode (backward compatible) ──
   python -m deep_compressor.train --config configs/default.yaml \\
-      --data_path data/ntp_train.jsonl --stage 1
+      --data_path data/qa_train.json --eval_data_path data/qa_dev.json
 
-  # ── Legacy + wandb ──
+  # With wandb
   python -m deep_compressor.train --config configs/default.yaml \\
-      --data_path data/ntp_train.jsonl --stage 1 \\
-      --wandb --wandb_project deep-compressor-test
-
-  # ── Hydra mode (CLI overrides) ──
-  python -m deep_compressor.train \\
-      --config-path ../configs --config-name default \\
-      data_path=data/ntp_train.jsonl training.learning_rate=1e-3
+      --data_path data/qa_train.json --eval_data_path data/qa_dev.json \\
+      --wandb --wandb_project deep-compressor
 
   # Multi-GPU
   accelerate launch --multi_gpu --num_processes 4 \\
       -m deep_compressor.train --config configs/default.yaml \\
-      --data_path data/ntp_train.jsonl --stage 1
+      --data_path data/qa_train.json --eval_data_path data/qa_dev.json
 """
 
 import argparse
@@ -44,8 +38,8 @@ from torch.utils.data import DataLoader, Subset
 from transformers import AutoTokenizer
 
 from deep_compressor.config import DeepCompressorConfig
-from deep_compressor.data import NTPDataset, PaddingCollator, QADataset
-from deep_compressor.eval import evaluate_ntp, evaluate_qa
+from deep_compressor.data import PaddingCollator, QADataset
+from deep_compressor.eval import evaluate_qa
 from deep_compressor.model import DeepCompressor
 
 logger = logging.getLogger(__name__)
@@ -75,26 +69,9 @@ def save_checkpoint(model, accelerator: Accelerator, output_dir: str, tag):
     logger.info(f"Saved checkpoint to {save_path}")
 
 
-def _build_forward_kwargs(batch, mode: str, completed_steps: int):
-    """Build keyword arguments for model.forward() based on training mode."""
-    if mode == "ntp":
-        kwargs = dict(
-            mode="ntp",
-            doc_input_ids=batch["doc_input_ids"],
-            doc_attention_mask=batch["doc_attention_mask"],
-            segment_ids=batch["segment_ids"],
-            segment_attention_mask=batch["segment_attention_mask"],
-            segment_labels=batch["segment_labels"],
-        )
-        # Pass question if present in batch (question-guided NTP)
-        if "q_input_ids" in batch:
-            kwargs["q_input_ids"] = batch["q_input_ids"]
-            kwargs["q_attention_mask"] = batch["q_attention_mask"]
-        return kwargs
-
-    # QA mode
+def _build_forward_kwargs(batch, completed_steps: int):
+    """Build keyword arguments for model.forward()."""
     kwargs = dict(
-        mode="qa",
         doc_input_ids=batch["doc_input_ids"],
         doc_attention_mask=batch["doc_attention_mask"],
         q_input_ids=batch["q_input_ids"],
@@ -115,20 +92,19 @@ def _build_forward_kwargs(batch, mode: str, completed_steps: int):
 # ── unified training loop ──────────────────────────────────────────────
 def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                 train_loader: DataLoader, accelerator: Accelerator,
-                mode: str, eval_loader: DataLoader = None,
+                eval_loader: DataLoader = None,
                 tokenizer=None, optuna_callback=None,
                 diagnostic_callback=None, teacher_model=None):
-    """Train one stage (NTP or QA).
+    """Train QA model.
 
     Args:
-        mode: "ntp" for Stage 1, "qa" for Stage 2
         eval_loader: optional DataLoader for validation
         tokenizer: required for QA eval (decoding generated tokens)
         optuna_callback: optional callable(step, metrics) for Optuna pruning
         diagnostic_callback: optional callable(step, model, accelerator) -> dict
-        teacher_model: optional frozen Qwen model for on-the-fly distillation
-                       (QA mode only). When provided, teacher logits/hidden states
-                       are computed per batch rather than pre-cached.
+        teacher_model: optional frozen Qwen model for on-the-fly distillation.
+                       When provided, teacher logits/hidden states are computed
+                       per batch rather than pre-cached.
     """
     tcfg = config.training
 
@@ -157,12 +133,12 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
     while completed_steps < tcfg.max_steps:
         for batch in train_loader:
             with accelerator.accumulate(model):
-                fwd_kwargs = _build_forward_kwargs(batch, mode, completed_steps)
+                fwd_kwargs = _build_forward_kwargs(batch, completed_steps)
 
-                # On-the-fly teacher distillation (QA mode only)
+                # On-the-fly teacher distillation
                 # Teacher sees full document + question + answer (uncompressed)
                 # and we extract only the Q+A tail for distillation targets.
-                if teacher_model is not None and mode == "qa":
+                if teacher_model is not None:
                     with torch.no_grad():
                         t_input_ids = torch.cat([
                             batch["doc_input_ids"],
@@ -222,17 +198,17 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                         lr = scheduler.get_last_lr()[0]
                         ppl = torch.exp(torch.tensor(avg_loss)).item()
                         logger.info(
-                            f"[{mode.upper()}] step {completed_steps}/{tcfg.max_steps}  "
+                            f"[QA] step {completed_steps}/{tcfg.max_steps}  "
                             f"loss={avg_loss:.4f}  ppl={ppl:.2f}  lr={lr:.2e}")
 
                         # log to wandb via accelerator
                         log_dict = {
-                            f"{mode}/loss": avg_loss,
-                            f"{mode}/ppl": ppl,
-                            f"{mode}/lr": lr,
+                            "qa/loss": avg_loss,
+                            "qa/ppl": ppl,
+                            "qa/lr": lr,
                         }
                         for k, v in running_components.items():
-                            log_dict[f"{mode}/{k}"] = v / max(micro_steps, 1)
+                            log_dict[f"qa/{k}"] = v / max(micro_steps, 1)
                         accelerator.log(log_dict, step=completed_steps)
 
                     running_loss = 0.0
@@ -251,27 +227,17 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                         and completed_steps % tcfg.eval_every == 0):
                     accelerator.wait_for_everyone()
                     model.eval()
-                    if mode == "ntp":
-                        metrics = evaluate_ntp(model, eval_loader,
-                                               accelerator, tokenizer=tokenizer,
-                                               collect_samples=3)
-                        if accelerator.is_main_process:
-                            logger.info(
-                                f"[NTP EVAL] step {completed_steps}  "
-                                f"perplexity={metrics['perplexity']:.2f}  "
-                                f"loss={metrics['loss']:.4f}")
-                    else:
-                        metrics = evaluate_qa(
-                            model, eval_loader, tokenizer, accelerator,
-                            max_new_tokens=config.qwen.max_answer_tokens,
-                            show_samples=5)  # Show 5 sample predictions
-                        if accelerator.is_main_process:
-                            logger.info(
-                                f"[QA EVAL] step {completed_steps}  "
-                                f"loss={metrics['loss']:.4f}  "
-                                f"ppl={metrics['perplexity']:.2f}  "
-                                f"EM={metrics['exact_match']:.2%}  "
-                                f"F1={metrics['f1']:.4f}")
+                    metrics = evaluate_qa(
+                        model, eval_loader, tokenizer, accelerator,
+                        max_new_tokens=config.qwen.max_answer_tokens,
+                        show_samples=5)
+                    if accelerator.is_main_process:
+                        logger.info(
+                            f"[QA EVAL] step {completed_steps}  "
+                            f"loss={metrics['loss']:.4f}  "
+                            f"ppl={metrics['perplexity']:.2f}  "
+                            f"EM={metrics['exact_match']:.2%}  "
+                            f"F1={metrics['f1']:.4f}")
 
                     # log eval metrics
                     if accelerator.is_main_process:
@@ -431,98 +397,44 @@ def _run_training(config: DeepCompressorConfig,
 
     os.makedirs(tcfg.output_dir, exist_ok=True)
 
-    last_metrics = None
+    dataset = QADataset(data_path, tokenizer,
+                        max_doc_tokens=config.qwen.max_doc_tokens,
+                        max_question_tokens=config.qwen.max_question_tokens,
+                        max_answer_tokens=config.qwen.max_answer_tokens)
 
-    if tcfg.stage == 1:
-        dataset = NTPDataset(data_path, tokenizer,
-                             max_doc_tokens=config.qwen.max_doc_tokens,
-                             segment_len=tcfg.ntp_segment_len,
-                             use_questions=config.ablation.ntp_use_questions)
+    # Truncate training data if requested
+    if max_train_samples > 0 and max_train_samples < len(dataset):
+        dataset = Subset(dataset,
+                         list(range(max_train_samples)))
+        logger.info(f"Truncated QA dataset to {max_train_samples} samples")
 
-        # Truncate training data if requested
-        if max_train_samples > 0 and max_train_samples < len(dataset):
-            dataset = Subset(dataset,
-                             list(range(max_train_samples)))
-            logger.info(f"Truncated NTP dataset to {max_train_samples} samples")
+    loader = DataLoader(dataset, batch_size=tcfg.batch_size, shuffle=True,
+                        collate_fn=collator, num_workers=num_workers,
+                        pin_memory=pin_memory)
+    logger.info(f"QA dataset: {len(dataset):,} samples")
 
-        # Split last 5000 samples (or 10%) as validation
-        n_total = len(dataset)
-        n_val = min(5000, n_total // 10) if n_total > 10 else 0
-        n_train = n_total - n_val
-
-        if n_val > 0:
-            train_indices = list(range(n_train))
-            val_indices = list(range(n_train, n_total))
-            train_subset = Subset(dataset, train_indices)
-            val_subset = Subset(dataset, val_indices)
-        else:
-            train_subset = dataset
-            val_subset = None
-
-        loader = DataLoader(train_subset, batch_size=tcfg.batch_size,
-                            shuffle=True, collate_fn=collator,
-                            num_workers=num_workers, pin_memory=pin_memory)
-        eval_loader = None
-        if val_subset is not None:
-            if max_eval_samples > 0:
-                val_subset = Subset(val_subset,
-                                    list(range(min(max_eval_samples,
-                                                   len(val_subset)))))
-            eval_loader = DataLoader(val_subset, batch_size=tcfg.batch_size,
-                                     shuffle=False, collate_fn=collator,
-                                     num_workers=num_workers,
-                                     pin_memory=pin_memory)
-            logger.info(f"NTP eval split: {len(val_subset):,} samples")
-
-        logger.info(f"NTP dataset: {len(train_subset):,} train samples, "
-                    f"segment_len={tcfg.ntp_segment_len}")
-        _, last_metrics = train_stage(
-            config, model, loader, accelerator, mode="ntp",
-            eval_loader=eval_loader, tokenizer=tokenizer,
-            optuna_callback=optuna_callback,
-            diagnostic_callback=diagnostic_callback)
-
-    elif tcfg.stage == 2:
-        dataset = QADataset(data_path, tokenizer,
+    eval_loader = None
+    if eval_data_path:
+        eval_ds = QADataset(eval_data_path, tokenizer,
                             max_doc_tokens=config.qwen.max_doc_tokens,
                             max_question_tokens=config.qwen.max_question_tokens,
                             max_answer_tokens=config.qwen.max_answer_tokens)
+        if max_eval_samples > 0:
+            eval_ds = Subset(eval_ds,
+                             list(range(min(max_eval_samples,
+                                            len(eval_ds)))))
+        eval_loader = DataLoader(eval_ds, batch_size=tcfg.batch_size,
+                                 shuffle=False, collate_fn=collator,
+                                 num_workers=num_workers,
+                                 pin_memory=pin_memory)
+        logger.info(f"QA eval: {len(eval_ds):,} samples")
 
-        # Truncate training data if requested
-        if max_train_samples > 0 and max_train_samples < len(dataset):
-            dataset = Subset(dataset,
-                             list(range(max_train_samples)))
-            logger.info(f"Truncated QA dataset to {max_train_samples} samples")
-
-        loader = DataLoader(dataset, batch_size=tcfg.batch_size, shuffle=True,
-                            collate_fn=collator, num_workers=num_workers,
-                            pin_memory=pin_memory)
-        logger.info(f"QA dataset: {len(dataset):,} samples")
-
-        eval_loader = None
-        if eval_data_path:
-            eval_ds = QADataset(eval_data_path, tokenizer,
-                                max_doc_tokens=config.qwen.max_doc_tokens,
-                                max_question_tokens=config.qwen.max_question_tokens,
-                                max_answer_tokens=config.qwen.max_answer_tokens)
-            if max_eval_samples > 0:
-                eval_ds = Subset(eval_ds,
-                                 list(range(min(max_eval_samples,
-                                                len(eval_ds)))))
-            eval_loader = DataLoader(eval_ds, batch_size=tcfg.batch_size,
-                                     shuffle=False, collate_fn=collator,
-                                     num_workers=num_workers,
-                                     pin_memory=pin_memory)
-            logger.info(f"QA eval: {len(eval_ds):,} samples")
-
-        _, last_metrics = train_stage(
-            config, model, loader, accelerator, mode="qa",
-            eval_loader=eval_loader, tokenizer=tokenizer,
-            optuna_callback=optuna_callback,
-            diagnostic_callback=diagnostic_callback)
-
-    else:
-        raise ValueError(f"Unknown stage: {tcfg.stage}")
+    last_metrics = None
+    _, last_metrics = train_stage(
+        config, model, loader, accelerator,
+        eval_loader=eval_loader, tokenizer=tokenizer,
+        optuna_callback=optuna_callback,
+        diagnostic_callback=diagnostic_callback)
 
     # ── final save ──
     accelerator.wait_for_everyone()
@@ -541,12 +453,10 @@ def main_legacy():
     parser = argparse.ArgumentParser(description="Train Deep Compressor")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--data_path", type=str, required=True)
-    parser.add_argument("--stage", type=int, default=None,
-                        help="Override training stage (1 or 2)")
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to checkpoint dir")
     parser.add_argument("--eval_data_path", type=str, default=None,
-                        help="Path to QA dev set (Stage 2) or NTP val split")
+                        help="Path to QA dev set")
     parser.add_argument("--max_eval_samples", type=int, default=0,
                         help="Limit eval samples (0 = all)")
     parser.add_argument("--max_train_samples", type=int, default=0,
@@ -572,8 +482,6 @@ def main_legacy():
     args = parser.parse_args()
 
     config = DeepCompressorConfig.from_yaml(args.config)
-    if args.stage is not None:
-        config.training.stage = args.stage
 
     # Build wandb config from CLI flags
     wandb_conf = None

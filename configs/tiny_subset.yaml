@@ -38,7 +38,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 1
   learning_rate: 5.0e-4
   batch_size: 1
   gradient_accumulation_steps: 4   # effective batch = 4
@@ -52,7 +51,6 @@ training:
   eval_every: 50                   # 4 eval points (50, 100, 150, 200)
   save_every: 200                  # save only at end
   output_dir: outputs/tiny_run
-  ntp_segment_len: 64
   gradient_checkpointing: true
   mixed_precision: "no"
 

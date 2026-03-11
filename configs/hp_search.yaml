@@ -37,7 +37,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 1
   learning_rate: 5.0e-4      # overridden per-trial
   batch_size: 1
   gradient_accumulation_steps: 4
@@ -51,7 +50,6 @@ training:
   eval_every: 75              # 4 eval points per trial
   save_every: 300             # only at end
   output_dir: outputs/hp_search
-  ntp_segment_len: 64
   gradient_checkpointing: true
   mixed_precision: "no"
 

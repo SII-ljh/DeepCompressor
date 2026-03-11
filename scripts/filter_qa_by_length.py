@@ -1,120 +1,159 @@
 #!/usr/bin/env python3
-"""Filter QA dataset by document length.
+"""Fast QA dataset filtering using cached length index.
 
-Keeps only samples where context length <= max_length.
+Strategy:
+1. First run: build length index (qa_train_lengths.json) - ONE TIME COST
+2. Subsequent runs: use cached index to filter instantly - NO tokenization
 
 Usage:
-    python scripts/filter_qa_by_length.py \
-        --input data/qa_large_train.json \
-        --output data/qa_large_train_512.json \
-        --max_length 512
+  # First time (builds index)
+  python scripts/filter_qa_by_length.py --max_tokens 512
+
+  # Second time (instant, reuses index)
+  python scripts/filter_qa_by_length.py --min_tokens 512 --max_tokens 2048
 """
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-# Add project root to path
+from transformers import AutoTokenizer
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-try:
-    from transformers import AutoTokenizer
-    HAS_TOKENIZER = True
-except ImportError:
-    HAS_TOKENIZER = False
-    print("Warning: transformers not installed, using character count")
+DATA_DIR = PROJECT_ROOT / "data"
 
 
-def filter_dataset(input_path: str, output_path: str, max_length: int,
-                   tokenizer=None):
-    """Filter dataset by context length."""
-    print(f"Loading dataset from {input_path}...")
+def build_length_index(data_path: str, tokenizer_path: str):
+    """Build and cache document length index.
 
-    with open(input_path, 'r') as f:
+    Returns: dict mapping sample index -> doc_length
+    """
+    index_path = data_path.replace(".json", "_lengths.json")
+
+    # Check if index already exists
+    if Path(index_path).exists():
+        print(f"✓ Found cached length index: {index_path}")
+        with open(index_path) as f:
+            return json.load(f)
+
+    print(f"Building length index for {data_path}...")
+    print("(This is a ONE-TIME operation, result will be cached)")
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+    with open(data_path) as f:
         data = json.load(f)
 
-    print(f"✓ Loaded {len(data):,} samples")
-    print(f"  Filtering: context <= {max_length} {('tokens' if tokenizer else 'characters')}")
-    print()
+    total = len(data)
+    lengths = {}
 
-    # Filter samples
+    import time
+    start = time.time()
+
+    for i, item in enumerate(data):
+        if i % 100 == 0 and i > 0:
+            elapsed = time.time() - start
+            rate = i / elapsed
+            eta = (total - i) / rate if rate > 0 else 0
+            print(f"  {i:,}/{total:,} ({100*i/total:.1f}%)  "
+                  f"{rate:.0f} samples/s  ETA: {eta/60:.1f}min", end="\r")
+
+        tokens = tokenizer.encode(item["context"], truncation=False)
+        lengths[str(i)] = len(tokens)
+
+    print(f"\n✓ Indexed {total:,} samples in {time.time()-start:.1f}s")
+
+    # Save index
+    print(f"Saving index to {index_path}...")
+    with open(index_path, "w") as f:
+        json.dump(lengths, f)
+
+    print(f"✓ Index cached. Future runs will be instant!\n")
+    return lengths
+
+
+def filter_with_index(data_path: str, output_path: str,
+                     lengths: dict, min_tokens: int, max_tokens: int):
+    """Filter dataset using pre-computed length index (instant)."""
+
+    print(f"Loading data from {data_path}...")
+    with open(data_path) as f:
+        data = json.load(f)
+
+    total = len(data)
+    print(f"Total samples: {total:,}")
+
+    if min_tokens > 0:
+        print(f"Filtering to {min_tokens} <= doc_tokens <= {max_tokens}...\n")
+    else:
+        print(f"Filtering to doc_tokens <= {max_tokens}...\n")
+
+    # Fast filtering using index (no tokenization!)
     filtered = []
-    length_distribution = []
+    for i, item in enumerate(data):
+        doc_len = lengths[str(i)]
+        if min_tokens <= doc_len <= max_tokens:
+            filtered.append(item)
 
-    for i, sample in enumerate(data):
-        if (i + 1) % 10000 == 0:
-            print(f"  Processed {i+1:,}/{len(data):,}...")
+    print(f"Filtered results:")
+    print(f"  Input:  {total:,} samples")
+    print(f"  Output: {len(filtered):,} samples ({100*len(filtered)/total:.1f}%)")
+    print(f"  Dropped: {total - len(filtered):,} samples\n")
 
-        context = sample.get('context', '')
-
-        # Calculate length
-        if tokenizer:
-            ctx_len = len(tokenizer.encode(context, add_special_tokens=False))
-        else:
-            ctx_len = len(context)
-
-        length_distribution.append(ctx_len)
-
-        if ctx_len <= max_length:
-            filtered.append(sample)
-
-    print(f"✓ Filtered {len(filtered):,}/{len(data):,} samples "
-          f"({100*len(filtered)/len(data):.1f}% kept)")
-    print()
-
-    # Statistics
-    import numpy as np
-    lengths = np.array(length_distribution)
-
-    print("Length statistics (before filtering):")
-    print(f"  Min:    {lengths.min():,}")
-    print(f"  Median: {int(np.median(lengths)):,}")
-    print(f"  Mean:   {int(lengths.mean()):,}")
-    print(f"  95th:   {int(np.percentile(lengths, 95)):,}")
-    print(f"  Max:    {lengths.max():,}")
-    print()
-
-    print(f"Samples > {max_length}: {(lengths > max_length).sum():,} "
-          f"({100*(lengths > max_length).sum()/len(lengths):.1f}% discarded)")
-    print()
-
-    # Save filtered data
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, 'w') as f:
+    print(f"Saving to {output_path}...")
+    with open(output_path, "w") as f:
         json.dump(filtered, f, ensure_ascii=False)
 
-    print(f"✓ Saved {len(filtered):,} samples to {output_path}")
-    print(f"  File size: {output_path.stat().st_size / 1e6:.1f} MB")
+    print(f"✓ Done! Saved {len(filtered):,} samples")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Filter QA dataset by context length"
+        description="Fast QA filtering using cached length index"
     )
-    parser.add_argument("--input", type=str, required=True)
-    parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--min_tokens", type=int, default=0)
+    parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--tokenizer", type=str, default="models/Qwen3-0.6B")
-
+    parser.add_argument("--input_train", type=str, default=str(DATA_DIR / "qa_train.json"))
+    parser.add_argument("--input_dev", type=str, default=str(DATA_DIR / "qa_dev.json"))
     args = parser.parse_args()
 
-    # Load tokenizer
-    tokenizer = None
-    if HAS_TOKENIZER:
-        try:
-            print(f"Loading tokenizer from {args.tokenizer}...")
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.tokenizer, trust_remote_code=True)
-            print("✓ Tokenizer loaded\n")
-        except Exception as e:
-            print(f"Warning: {e}\nUsing character count\n")
+    # Build/load length index for train (ONE TIME COST)
+    train_lengths = build_length_index(args.input_train, args.tokenizer)
 
-    filter_dataset(args.input, args.output, args.max_length, tokenizer)
+    print("=" * 70)
+
+    # Build/load length index for dev
+    dev_lengths = build_length_index(args.input_dev, args.tokenizer)
+
+    print("=" * 70 + "\n")
+
+    # Generate output filename
+    if args.min_tokens > 0:
+        suffix = f"{args.min_tokens}_{args.max_tokens}"
+    else:
+        suffix = f"{args.max_tokens}"
+
+    # Filter train (INSTANT with index)
+    output_train = DATA_DIR / f"qa_train_filtered_{suffix}.json"
+    filter_with_index(args.input_train, str(output_train),
+                     train_lengths, args.min_tokens, args.max_tokens)
+
+    print("\n" + "=" * 70 + "\n")
+
+    # Filter dev
+    output_dev = DATA_DIR / f"qa_dev_filtered_{suffix}.json"
+    filter_with_index(args.input_dev, str(output_dev),
+                     dev_lengths, args.min_tokens, args.max_tokens)
+
+    print("\n" + "=" * 70)
+    print("Summary:")
+    print(f"  Train: {output_train}")
+    print(f"  Dev:   {output_dev}")
+    if args.min_tokens > 0:
+        print(f"\nFiltered to {args.min_tokens} <= doc_tokens <= {args.max_tokens}")
+    else:
+        print(f"\nFiltered to doc_tokens <= {args.max_tokens}")
 
 
 if __name__ == "__main__":

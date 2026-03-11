@@ -73,7 +73,6 @@ class LossHydraConf:
 
 @dataclass
 class TrainingHydraConf:
-    stage: int = 1
     learning_rate: float = 1e-4
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
@@ -87,7 +86,6 @@ class TrainingHydraConf:
     eval_every: int = 500
     save_every: int = 1000
     output_dir: str = "outputs"
-    ntp_segment_len: int = 256
     gradient_checkpointing: bool = False
     mixed_precision: str = "no"
 

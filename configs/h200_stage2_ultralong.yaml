@@ -37,7 +37,6 @@ loss:
   hidden_mse_weight: 0.1
 
 training:
-  stage: 2
   learning_rate: 5.0e-5
   batch_size: 1                  # ← Very small batch due to 8K context
   gradient_accumulation_steps: 8 # ← High accumulation (effective batch=64)
@@ -51,7 +50,6 @@ training:
   eval_every: 1000
   save_every: 2000
   output_dir: outputs/h200_stage2_ultralong
-  ntp_segment_len: 256
   gradient_checkpointing: true   # ← Absolutely required
   mixed_precision: "bf16"        # ← Absolutely required
 

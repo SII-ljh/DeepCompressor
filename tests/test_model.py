@@ -111,22 +111,6 @@ def test_trainable_params(tiny_config):
     assert any("perceiver" in n for n in trainable)
 
 
-def test_forward_ntp_returns_finite_loss(tiny_config, batch_size, doc_len):
-    cfg = tiny_config
-    model = _make_model(cfg)
-    seg_len = 12
-
-    doc_ids = torch.randint(0, cfg.qwen.vocab_size, (batch_size, doc_len))
-    doc_mask = torch.ones(batch_size, doc_len, dtype=torch.long)
-    seg_ids = torch.randint(0, cfg.qwen.vocab_size, (batch_size, seg_len))
-    seg_mask = torch.ones(batch_size, seg_len, dtype=torch.long)
-    seg_labels = torch.randint(0, cfg.qwen.vocab_size, (batch_size, seg_len))
-
-    losses = model.forward_ntp(doc_ids, doc_mask, seg_ids, seg_mask, seg_labels)
-    assert torch.isfinite(losses["total"])
-    assert losses["total"].item() > 0
-
-
 def test_forward_qa_returns_finite_loss(tiny_config, batch_size, doc_len, q_len):
     cfg = tiny_config
     model = _make_model(cfg)
@@ -145,17 +129,20 @@ def test_forward_qa_returns_finite_loss(tiny_config, batch_size, doc_len, q_len)
     assert "qa_ce" in losses
 
 
-def test_forward_ntp_backward(tiny_config, batch_size, doc_len):
+def test_forward_qa_backward(tiny_config, batch_size, doc_len, q_len):
     cfg = tiny_config
     model = _make_model(cfg)
+    a_len = 8
 
-    doc_ids = torch.randint(0, cfg.qwen.vocab_size, (batch_size, doc_len))
-    doc_mask = torch.ones(batch_size, doc_len, dtype=torch.long)
-    seg_ids = torch.randint(0, cfg.qwen.vocab_size, (batch_size, 12))
-    seg_mask = torch.ones(batch_size, 12, dtype=torch.long)
-    seg_labels = torch.randint(0, cfg.qwen.vocab_size, (batch_size, 12))
-
-    losses = model.forward_ntp(doc_ids, doc_mask, seg_ids, seg_mask, seg_labels)
+    losses = model.forward_qa(
+        doc_input_ids=torch.randint(0, cfg.qwen.vocab_size, (batch_size, doc_len)),
+        doc_attention_mask=torch.ones(batch_size, doc_len, dtype=torch.long),
+        q_input_ids=torch.randint(0, cfg.qwen.vocab_size, (batch_size, q_len)),
+        q_attention_mask=torch.ones(batch_size, q_len, dtype=torch.long),
+        answer_ids=torch.randint(0, cfg.qwen.vocab_size, (batch_size, a_len)),
+        answer_attention_mask=torch.ones(batch_size, a_len, dtype=torch.long),
+        answer_labels=torch.randint(0, cfg.qwen.vocab_size, (batch_size, a_len)),
+    )
     losses["total"].backward()
 
     # Check that trainable params have gradients

@@ -75,7 +75,6 @@ class LossConfig:
 
 @dataclass
 class TrainingConfig:
-    stage: int = 1  # 1 = NTP pretraining, 2 = QA + distillation
     learning_rate: float = 1e-4
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
@@ -89,7 +88,6 @@ class TrainingConfig:
     eval_every: int = 500
     save_every: int = 1000
     output_dir: str = "outputs"
-    ntp_segment_len: int = 256
     gradient_checkpointing: bool = False
     mixed_precision: str = "no"  # "no", "fp16", "bf16"
 
@@ -102,9 +100,6 @@ class AblationConfig:
 
     # QueryInit: whether to condition on question
     query_condition_on_question: bool = True
-
-    # NTP: whether to use questions for guided compression (Stage 1)
-    ntp_use_questions: bool = False
 
     # Perceiver stage enables
     enable_stage_a: bool = True

@@ -25,7 +25,7 @@ from deep_compressor.data import NTPDataset, PaddingCollator, QADataset
 from deep_compressor.model import DeepCompressor
 
 
-# ─── device / tensor helpers (migrated from diagnostic.py) ───────────
+# ─── device / tensor helpers ──────────────────────────────────────────
 
 
 def detect_device() -> torch.device:

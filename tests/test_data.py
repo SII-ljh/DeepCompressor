@@ -4,7 +4,7 @@ import json
 
 import torch
 
-from deep_compressor.data import NTPDataset, PaddingCollator, QADataset
+from deep_compressor.data import PaddingCollator, QADataset
 
 
 class _FakeTokenizer:
@@ -24,24 +24,6 @@ class _FakeTokenizer:
             ids = [1]
         t = torch.tensor([ids])
         return {"input_ids": t, "attention_mask": torch.ones_like(t)}
-
-
-def test_ntp_dataset(tmp_path):
-    data_file = tmp_path / "train.jsonl"
-    texts = [{"text": "a" * 100}, {"text": "b" * 50}]
-    with open(data_file, "w") as f:
-        for t in texts:
-            f.write(json.dumps(t) + "\n")
-
-    tokenizer = _FakeTokenizer()
-    ds = NTPDataset(str(data_file), tokenizer, max_doc_tokens=64, segment_len=16)
-    assert len(ds) == 2
-    sample = ds[0]
-    assert "doc_input_ids" in sample
-    assert "segment_ids" in sample
-    assert "segment_labels" in sample
-    assert sample["doc_input_ids"].dim() == 1
-    assert sample["segment_ids"].dim() == 1
 
 
 def test_qa_dataset(tmp_path):

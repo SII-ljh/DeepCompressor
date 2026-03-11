@@ -38,7 +38,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 1
   learning_rate: 5.0e-4
   batch_size: 1
   gradient_accumulation_steps: 4
@@ -52,7 +51,6 @@ training:
   eval_every: 100
   save_every: 500
   output_dir: outputs/ablation
-  ntp_segment_len: 64
   gradient_checkpointing: true
   mixed_precision: "no"
 

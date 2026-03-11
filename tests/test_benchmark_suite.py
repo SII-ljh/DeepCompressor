@@ -251,7 +251,7 @@ def _make_config_and_qwen(num_queries=8):
             ff_mult=2, dropout=0.0),
         projection=ProjectionConfig(down_hidden=48, up_hidden=48, dropout=0.0),
         loss=LossConfig(hidden_distill_layers=[1, 3]),
-        training=TrainingConfig(stage=1, batch_size=2),
+        training=TrainingConfig(batch_size=2),
     )
     qwen = _MockQwenModel(64, 100, 4)
     return cfg, qwen

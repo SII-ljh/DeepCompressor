@@ -16,7 +16,6 @@ def test_default_config():
     cfg = DeepCompressorConfig()
     assert cfg.qwen.hidden_size == 1024
     assert cfg.perceiver.perceiver_dim == 1024
-    assert cfg.training.stage == 1
 
 
 def test_tiny_config(tiny_config):

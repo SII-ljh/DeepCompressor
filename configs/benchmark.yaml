@@ -37,7 +37,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 2
   learning_rate: 1.0e-4
   batch_size: 4
   gradient_accumulation_steps: 4
@@ -51,7 +50,6 @@ training:
   eval_every: 500
   save_every: 1000
   output_dir: outputs/benchmark
-  ntp_segment_len: 256
   gradient_checkpointing: false
   mixed_precision: "no"
 

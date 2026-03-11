@@ -31,7 +31,6 @@ loss:
   kl_weight: 0.0
   hidden_mse_weight: 0.0
 training:
-  stage: 2
   learning_rate: 0.0001
   batch_size: 30
   gradient_accumulation_steps: 2
@@ -44,7 +43,6 @@ training:
   log_every: 50
   eval_every: 252
   save_every: 1008
-  ntp_segment_len: 256
   gradient_checkpointing: false
   mixed_precision: bf16
   output_dir: outputs/qa_q128_8gpu
@@ -52,7 +50,6 @@ ablation:
   down_proj_mode: identity
   up_proj_mode: identity
   query_condition_on_question: true
-  ntp_use_questions: false
   enable_stage_a: true
   enable_stage_b: true
   enable_stage_c: true

@@ -1,110 +1,14 @@
-"""Datasets and collators for NTP pretraining and QA fine-tuning."""
+"""Datasets and collators for QA fine-tuning."""
 
 import json
-import os
-import random
-from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
 
 
-class NTPDataset(Dataset):
-    """Next-token prediction dataset for Stage 1 pretraining.
-
-    Each sample: compress document → prefix → predict continuation segment.
-    Reads jsonl with {"text": "..."} per line.
-
-    Uses lazy loading: only byte offsets are stored in memory (~22 MB for 2.7M
-    entries), and text is read from disk on demand.  This keeps RAM usage low
-    even for multi-GB JSONL files.
-    """
-
-    def __init__(self, data_path: str, tokenizer, max_doc_tokens: int = 8192,
-                 segment_len: int = 256, seed: int = 42, use_questions: bool = False):
-        self.tokenizer = tokenizer
-        self.max_doc_tokens = max_doc_tokens
-        self.segment_len = segment_len
-        self.rng = random.Random(seed)
-        self.data_path = str(Path(data_path).resolve())
-        self.use_questions = use_questions
-
-        # Build byte-offset index (one pass, no f.tell() per line)
-        self.offsets: List[int] = []
-        pos = 0
-        with open(self.data_path, "rb") as f:
-            for line in f:
-                if line.strip():
-                    self.offsets.append(pos)
-                pos += len(line)
-
-        # Per-worker file handle (reopened after fork)
-        self._fh = None
-        self._fh_pid = -1
-
-    def _read_line(self, idx: int) -> str:
-        """Seek to offset and read one line.  Reopens the file if the PID
-        changed (i.e. we are in a forked DataLoader worker)."""
-        pid = os.getpid()
-        if self._fh is None or self._fh_pid != pid:
-            if self._fh is not None:
-                try:
-                    self._fh.close()
-                except Exception:
-                    pass
-            self._fh = open(self.data_path, "rb")
-            self._fh_pid = pid
-        self._fh.seek(self.offsets[idx])
-        return self._fh.readline().decode("utf-8")
-
-    def __len__(self) -> int:
-        return len(self.offsets)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        data = json.loads(self._read_line(idx))
-        text = data["text"]
-        tokens = self.tokenizer(text, truncation=True,
-                                max_length=self.max_doc_tokens + self.segment_len,
-                                return_tensors="pt", padding=False)
-        input_ids = tokens["input_ids"].squeeze(0)
-        total_len = input_ids.shape[0]
-
-        # Split: doc part and continuation segment
-        if total_len <= self.segment_len + 1:
-            split_point = total_len // 2
-        else:
-            max_split = total_len - self.segment_len
-            split_point = self.rng.randint(1, max(1, min(max_split, self.max_doc_tokens)))
-
-        doc_ids = input_ids[:split_point]
-        seg_ids = input_ids[split_point:]
-
-        # Pass raw segment tokens as both input and labels.
-        # HuggingFace ForCausalLMLoss handles the causal shift internally
-        # (logits[i] predicts labels[i+1]).
-        result = {
-            "doc_input_ids": doc_ids,
-            "segment_ids": seg_ids,
-            "segment_labels": seg_ids.clone(),
-        }
-
-        # Add question if available and enabled
-        if self.use_questions and "question" in data:
-            q_tokens = self.tokenizer(
-                data["question"],
-                truncation=True,
-                max_length=256,  # Max question length
-                return_tensors="pt",
-                padding=False
-            )
-            result["q_input_ids"] = q_tokens["input_ids"].squeeze(0)
-
-        return result
-
-
 class QADataset(Dataset):
-    """QA dataset for Stage 2 fine-tuning + distillation.
+    """QA dataset for fine-tuning + distillation.
 
     Reads json with [{"context": ..., "question": ..., "answer": ...}, ...].
     """

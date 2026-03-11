@@ -34,7 +34,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 1
   learning_rate: 1.0e-4
   batch_size: 4
   gradient_accumulation_steps: 4
@@ -45,7 +44,6 @@ training:
   scheduler: cosine
   seed: 42
   output_dir: outputs
-  ntp_segment_len: 256
   gradient_checkpointing: false
   mixed_precision: "no"          # "no" / "fp16" / "bf16"
 

@@ -3,11 +3,7 @@
 import torch
 import torch.nn as nn
 
-from deep_compressor.eval import (
-    compute_exact_match,
-    compute_f1,
-    normalize_text,
-)
+from deep_compressor.eval import compute_exact_match, compute_f1, normalize_text
 
 
 # ── normalize_text ──────────────────────────────────────────────────────
@@ -84,7 +80,7 @@ class TestF1:
         assert abs(f1 - 8 / 9) < 1e-6
 
 
-# ── evaluate_ntp shape test ─────────────────────────────────────────────
+# ── generate_answer shape test ─────────────────────────────────────────
 
 class _MockQwenOutput:
     def __init__(self, hidden_states=None, last_hidden_state=None, logits=None, loss=None):
@@ -165,7 +161,7 @@ def _make_tiny_model():
             ff_mult=2, dropout=0.0),
         projection=ProjectionConfig(down_hidden=48, up_hidden=48, dropout=0.0),
         loss=LossConfig(hidden_distill_layers=[1, 3]),
-        training=TrainingConfig(stage=1, batch_size=2),
+        training=TrainingConfig(batch_size=2),
     )
     mock_qwen = _MockQwenModel(64, 100, 4)
     return DeepCompressor(cfg, qwen_model=mock_qwen), cfg
@@ -177,40 +173,6 @@ class _FakeTokenizer:
 
     def batch_decode(self, ids, skip_special_tokens=True):
         return ["fake answer"] * ids.shape[0]
-
-
-def test_evaluate_ntp_shape():
-    """Verify evaluate_ntp returns perplexity and loss as floats."""
-    from unittest.mock import MagicMock
-    from deep_compressor.eval import evaluate_ntp
-    from deep_compressor.data import PaddingCollator
-    from torch.utils.data import DataLoader, TensorDataset
-
-    model, cfg = _make_tiny_model()
-    B, doc_len, seg_len = 2, 16, 12
-    V = cfg.qwen.vocab_size
-
-    # Build a tiny dataset (3 batches)
-    samples = []
-    for _ in range(4):
-        samples.append({
-            "doc_input_ids": torch.randint(0, V, (doc_len,)),
-            "segment_ids": torch.randint(0, V, (seg_len,)),
-            "segment_labels": torch.randint(0, V, (seg_len,)),
-        })
-    collator = PaddingCollator(pad_token_id=0)
-    loader = DataLoader(samples, batch_size=2, collate_fn=collator)
-
-    # Mock accelerator
-    acc = MagicMock()
-    acc.device = torch.device("cpu")
-    acc.gather = lambda x: x  # no-op for single process
-
-    metrics = evaluate_ntp(model, loader, acc)
-    assert "perplexity" in metrics
-    assert "loss" in metrics
-    assert metrics["perplexity"] > 0
-    assert metrics["loss"] > 0
 
 
 def test_generate_answer_shape():

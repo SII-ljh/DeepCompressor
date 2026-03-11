@@ -37,7 +37,6 @@ loss:
   hidden_mse_weight: 1.0
 
 training:
-  stage: 1
   learning_rate: 5.0e-4       # ← higher for faster convergence in quick test
   batch_size: 1                # ← 1 for MacBook memory
   gradient_accumulation_steps: 8  # effective batch = 8
@@ -51,7 +50,6 @@ training:
   eval_every: 100
   save_every: 100
   output_dir: outputs
-  ntp_segment_len: 64          # ← reduced from 256
   gradient_checkpointing: true   # save memory on 24GB MacBook
   mixed_precision: "no"          # MPS fp16 support is limited
 
