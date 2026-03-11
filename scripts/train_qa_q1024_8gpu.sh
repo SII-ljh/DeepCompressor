@@ -58,7 +58,7 @@ echo "Starting training..."
 echo ""
 
 # Run training with accelerate
-export WANDB_MODE=disabled
+export WANDB_MODE=offline
 
 accelerate launch \
     --multi_gpu \
@@ -69,6 +69,7 @@ accelerate launch \
     --data_path "$DATA_PATH" \
     --eval_data_path "$EVAL_DATA_PATH" \
     --max_eval_samples 5000 \
+    --wandb --wandb_project deep-compressor --wandb_offline \
     2>&1 | tee "${OUTPUT_DIR}_training.log"
 
 EXIT_CODE=$?
