@@ -48,6 +48,7 @@ class QADataset(Dataset):
             "q_input_ids": question["input_ids"].squeeze(0),
             "answer_ids": answer_ids,
             "answer_labels": answer_ids.clone(),
+            "context_text": item["context"],    # Raw text for baseline eval
             "question_text": item["question"],  # For eval sample display
             "answer_text": item["answer"],
         }

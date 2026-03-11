@@ -253,7 +253,7 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
         # Compute loss (teacher-forcing with gold answers)
         suffix_ids = torch.cat([batch["q_input_ids"], batch["answer_ids"]], dim=1)
         suffix_mask = torch.cat([batch["q_attention_mask"],
-                                torch.ones_like(batch["answer_ids"])], dim=1)
+                                batch["answer_attention_mask"]], dim=1)
         q_len = batch["q_input_ids"].shape[1]
         q_labels = torch.full_like(batch["q_input_ids"], -100)
         full_labels = torch.cat([q_labels, batch["answer_labels"]], dim=1)

@@ -218,7 +218,7 @@ def evaluate_qa_detailed(
         suffix_ids = torch.cat([batch["q_input_ids"], batch["answer_ids"]], dim=1)
         suffix_mask = torch.cat(
             [batch["q_attention_mask"],
-             torch.ones_like(batch["answer_ids"])], dim=1)
+             batch["answer_attention_mask"]], dim=1)
         q_labels = torch.full_like(batch["q_input_ids"], -100)
         full_labels = torch.cat([q_labels, batch["answer_labels"]], dim=1)
         outputs = unwrapped.decode(prefix_embeds, suffix_ids, suffix_mask,
@@ -401,15 +401,45 @@ def discover_baseline_models(models_dir: str = "models") -> List[Tuple[str, str]
     return found
 
 
+def _apply_chat_template(tokenizer, context: str, question: str,
+                         enable_thinking: bool = False) -> str:
+    """Format context+question using the model's chat template.
+
+    Returns the prompt string (without answer).  When *enable_thinking* is
+    ``False`` an empty ``<think></think>`` block is inserted so Qwen3 skips
+    its internal reasoning and predicts answer tokens directly.
+    """
+    messages = [
+        {"role": "user",
+         "content": f"Context: {context}\n\nQuestion: {question}"},
+    ]
+    try:
+        return tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True,
+            tokenize=False, enable_thinking=enable_thinking)
+    except TypeError:
+        # Older tokenizer without enable_thinking kwarg
+        return tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove ``<think>…</think>`` blocks from generated text."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 @torch.no_grad()
 def evaluate_baseline_qa(
     qwen_model, eval_loader: DataLoader, tokenizer,
     accelerator: Accelerator, max_new_tokens: int = 64,
     source_label: str = "dev", total_samples: int = 0,
+    max_context_tokens: int = 4096,
 ) -> Tuple[Dict[str, float], List[SampleResult]]:
     """Evaluate raw Qwen (no compression) on QA as upper bound.
 
-    Feeds full [doc_tokens | question_tokens] as input, generates answer.
+    Uses the model's chat template to format input properly for Qwen3
+    instruct models, avoiding the PPL inflation caused by feeding raw
+    concatenated tokens to a chat-tuned model.
     """
     qwen_model.eval()
     unwrapped = accelerator.unwrap_model(qwen_model)
@@ -418,6 +448,9 @@ def evaluate_baseline_qa(
     loss_per_sample = []
     global_idx = 0
 
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+
     total_batches = len(eval_loader)
     for batch_idx, batch in enumerate(eval_loader):
         if accelerator.is_main_process and batch_idx % 20 == 0:
@@ -425,58 +458,82 @@ def evaluate_baseline_qa(
             print(f"\r  [{source_label}] batch {batch_idx}/{total_batches} "
                   f"({pct:.0f}%)", end="", flush=True)
 
-        doc_ids = batch["doc_input_ids"]
-        doc_mask = batch["doc_attention_mask"]
-        q_ids = batch["q_input_ids"]
-        q_mask = batch["q_attention_mask"]
-        ans_ids = batch["answer_ids"]
-        ans_labels = batch["answer_labels"]
-        ans_mask = batch["answer_attention_mask"]
+        contexts = batch["context_text"]      # list[str]
+        questions = batch["question_text"]    # list[str]
+        golds = batch["answer_text"]          # list[str]
+        B = len(contexts)
+        device = accelerator.device
 
-        # Teacher-forcing loss: strip per-field padding, re-concat, right-pad
-        # Labels: -100 for doc+question, real labels for answer only
-        ignore_doc = torch.full_like(doc_ids, -100)
-        ignore_q = torch.full_like(q_ids, -100)
-        input_ids, attn_mask, labels = _build_right_padded(
-            [doc_ids, q_ids, ans_ids],
-            [doc_mask, q_mask, ans_mask],
-            [ignore_doc, ignore_q, ans_labels],
-            tokenizer.pad_token_id,
-        )
+        # ── Per-sample: build chat-formatted token sequences ──────────
+        all_full_ids: List[torch.Tensor] = []
+        all_labels: List[torch.Tensor] = []
+        all_prompt_ids: List[torch.Tensor] = []
+
+        for i in range(B):
+            prompt_text = _apply_chat_template(
+                tokenizer, contexts[i], questions[i], enable_thinking=False)
+            prompt_ids = tokenizer(
+                prompt_text, add_special_tokens=False,
+                truncation=True, max_length=max_context_tokens,
+            )["input_ids"]
+            answer_ids = tokenizer(
+                golds[i], add_special_tokens=False,
+                truncation=True, max_length=512,
+            )["input_ids"]
+
+            full_ids = prompt_ids + answer_ids + [eos_id]
+            labels = [-100] * len(prompt_ids) + answer_ids + [eos_id]
+
+            all_full_ids.append(torch.tensor(full_ids, dtype=torch.long))
+            all_labels.append(torch.tensor(labels, dtype=torch.long))
+            all_prompt_ids.append(torch.tensor(prompt_ids, dtype=torch.long))
+
+        # ── Right-pad for teacher-forcing loss ────────────────────────
+        max_len = max(t.shape[0] for t in all_full_ids)
+        rp_ids = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
+        rp_labels = torch.full((B, max_len), -100, dtype=torch.long, device=device)
+        rp_mask = torch.zeros((B, max_len), dtype=torch.long, device=device)
+        for i in range(B):
+            slen = all_full_ids[i].shape[0]
+            rp_ids[i, :slen] = all_full_ids[i]
+            rp_labels[i, :slen] = all_labels[i]
+            rp_mask[i, :slen] = 1
+
         outputs = unwrapped(
-            input_ids=input_ids, attention_mask=attn_mask,
-            labels=labels, use_cache=False,
+            input_ids=rp_ids, attention_mask=rp_mask,
+            labels=rp_labels, use_cache=False,
         )
         batch_loss = outputs.loss.detach().item()
 
-        # Generate: strip per-field padding, re-concat, left-pad
-        gen_input, gen_mask = _build_left_padded(
-            [doc_ids, q_ids], [doc_mask, q_mask], tokenizer.pad_token_id)
-        input_len = gen_input.shape[1]
+        # ── Left-pad prompts for generation ───────────────────────────
+        max_plen = max(t.shape[0] for t in all_prompt_ids)
+        lp_ids = torch.full((B, max_plen), pad_id, dtype=torch.long, device=device)
+        lp_mask = torch.zeros((B, max_plen), dtype=torch.long, device=device)
+        for i in range(B):
+            slen = all_prompt_ids[i].shape[0]
+            lp_ids[i, max_plen - slen:] = all_prompt_ids[i]
+            lp_mask[i, max_plen - slen:] = 1
+
         gen_out = unwrapped.generate(
-            input_ids=gen_input, attention_mask=gen_mask,
+            input_ids=lp_ids, attention_mask=lp_mask,
             max_new_tokens=max_new_tokens, do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=pad_id,
+            eos_token_id=eos_id,
             repetition_penalty=1.2,
         )
-        # Strip input prefix from generated output
-        gen_only = gen_out[:, input_len:]
-        preds = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
+        gen_only = gen_out[:, max_plen:]
+        preds_raw = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
+        preds = [_strip_thinking(p) for p in preds_raw]
 
-        golds = batch["answer_text"]
-        questions = batch.get("question_text", [""] * len(preds))
-        doc_previews = tokenizer.batch_decode(
-            doc_ids[:, :120], skip_special_tokens=True)
-
+        # ── Collect per-sample metrics ────────────────────────────────
         for i, (pred, gold) in enumerate(zip(preds, golds)):
             em = compute_exact_match(pred, gold)
             f1 = compute_f1(pred, gold)
             rl = compute_rouge_l(pred, gold)
             loss_per_sample.append(batch_loss)
 
-            q_text = questions[i] if isinstance(questions, list) and i < len(questions) else ""
-            ctx = doc_previews[i] if i < len(doc_previews) else ""
+            q_text = questions[i] if i < len(questions) else ""
+            ctx = contexts[i][:200] if i < len(contexts) else ""
             samples.append(SampleResult(
                 idx=global_idx, question=q_text, gold=gold,
                 prediction=pred, context_preview=ctx,
