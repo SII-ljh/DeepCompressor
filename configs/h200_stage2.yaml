@@ -63,3 +63,5 @@ wandb:
   project: deep-compressor
   run_name: "stage2-8xH200-0.6B-qa"
   tags: ["stage2", "8xH200", "0.6B", "qa", "distillation"]
+  group: "stage2-h200"
+  notes: null

@@ -72,6 +72,8 @@ wandb:
   project: deep-compressor
   run_name: "stage2-8xH200-long-optimized"
   tags: ["stage2", "8xH200", "long-seq", "4096-tokens", "single-stage"]
+  group: "stage2-h200"
+  notes: null
 
 # ── Performance Notes ──
 #

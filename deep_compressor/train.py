@@ -27,7 +27,9 @@ Usage:
 import argparse
 import logging
 import os
+import re
 import sys
+from datetime import datetime
 
 import torch
 from accelerate import Accelerator
@@ -43,6 +45,114 @@ from deep_compressor.eval import evaluate_qa
 from deep_compressor.model import DeepCompressor
 
 logger = logging.getLogger(__name__)
+
+
+# ── wandb naming helpers ──────────────────────────────────────────────
+def _short_model_name(model_name_or_path: str) -> str:
+    """Extract short model identifier, e.g. 'Qwen/Qwen3-0.6B' -> 'qwen3-0.6B'."""
+    basename = model_name_or_path.rstrip("/").split("/")[-1]
+    # Remove common prefixes, keep concise
+    basename = re.sub(r"^[Qq]wen-?", "", basename)
+    return basename.lower() if basename else "unknown"
+
+
+def generate_run_name(config: DeepCompressorConfig,
+                      timestamp: str | None = None) -> str:
+    """Auto-generate a descriptive wandb run name from config.
+
+    Format: q{num_queries}_lr{lr}_{model}_{timestamp}
+    Example: q64_lr1e-4_qwen3-0.6b_20260311_143052
+    """
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    q = config.effective_num_queries
+    lr = config.training.learning_rate
+    model = _short_model_name(config.qwen.model_name_or_path)
+
+    # Format lr compactly: 1e-4, 5e-5, etc.
+    lr_str = f"{lr:.0e}".replace("+", "")
+
+    return f"q{q}_lr{lr_str}_{model}_{timestamp}"
+
+
+def generate_auto_tags(config: DeepCompressorConfig) -> list[str]:
+    """Auto-generate wandb tags from config for filtering/grouping."""
+    tags = []
+
+    # Model
+    model = _short_model_name(config.qwen.model_name_or_path)
+    tags.append(f"model:{model}")
+
+    # Compression ratio
+    q = config.effective_num_queries
+    tags.append(f"q{q}")
+
+    # Document length
+    tags.append(f"doc{config.qwen.max_doc_tokens}")
+
+    # Projection modes (only if non-default)
+    if config.ablation.down_proj_mode != "identity":
+        tags.append(f"down:{config.ablation.down_proj_mode}")
+    if config.ablation.up_proj_mode != "identity":
+        tags.append(f"up:{config.ablation.up_proj_mode}")
+
+    # Perceiver stage ablations
+    if not config.ablation.enable_stage_a:
+        tags.append("no-stage-a")
+    if not config.ablation.enable_stage_b:
+        tags.append("no-stage-b")
+    if not config.ablation.enable_stage_c:
+        tags.append("no-stage-c")
+
+    # Key hyperparameters
+    lr = config.training.learning_rate
+    tags.append(f"lr:{lr:.0e}".replace("+", ""))
+    bs = config.training.batch_size * config.training.gradient_accumulation_steps
+    tags.append(f"ebs{bs}")
+
+    return tags
+
+
+def build_wandb_conf(args) -> "SimpleNamespace | None":
+    """Build wandb SimpleNamespace config from argparse args + DeepCompressorConfig.
+
+    Auto-generates run_name and tags when not explicitly provided.
+    """
+    if not args.wandb:
+        return None
+
+    from types import SimpleNamespace
+
+    config = DeepCompressorConfig.from_yaml(args.config)
+
+    # Auto-generate run name if not provided
+    run_name = args.wandb_run_name
+    if not run_name:
+        run_name = generate_run_name(config)
+
+    # Merge explicit tags with auto-generated ones
+    explicit_tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()] \
+        if args.wandb_tags else []
+    auto_tags = generate_auto_tags(config)
+    # Explicit tags first, then auto tags (dedup preserving order)
+    seen = set()
+    merged_tags = []
+    for t in explicit_tags + auto_tags:
+        if t not in seen:
+            seen.add(t)
+            merged_tags.append(t)
+
+    return SimpleNamespace(
+        enabled=True,
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        run_name=run_name,
+        tags=merged_tags,
+        group=args.wandb_group,
+        notes=args.wandb_notes,
+        offline=args.wandb_offline,
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -351,13 +461,33 @@ def _run_training(config: DeepCompressorConfig,
                 wb_init["name"] = wandb_conf.run_name
             if getattr(wandb_conf, "tags", None):
                 wb_init["tags"] = list(wandb_conf.tags)
+            if getattr(wandb_conf, "group", None):
+                wb_init["group"] = wandb_conf.group
+            if getattr(wandb_conf, "notes", None):
+                wb_init["notes"] = wandb_conf.notes
             if getattr(wandb_conf, "offline", False):
                 os.environ["WANDB_MODE"] = "offline"
             init_kwargs["wandb"] = wb_init
 
+        # Flat hyperparameters for easy wandb dashboard filtering
+        flat_config = config.to_dict()
+        flat_config["_hp/num_queries"] = config.effective_num_queries
+        flat_config["_hp/learning_rate"] = config.training.learning_rate
+        flat_config["_hp/batch_size"] = config.training.batch_size
+        flat_config["_hp/effective_batch_size"] = (
+            config.training.batch_size
+            * config.training.gradient_accumulation_steps
+        )
+        flat_config["_hp/max_doc_tokens"] = config.qwen.max_doc_tokens
+        flat_config["_hp/max_steps"] = config.training.max_steps
+        flat_config["_hp/model"] = config.qwen.model_name_or_path
+        flat_config["_hp/down_proj_mode"] = config.ablation.down_proj_mode
+        flat_config["_hp/up_proj_mode"] = config.ablation.up_proj_mode
+        flat_config["_hp/mixed_precision"] = config.training.mixed_precision
+
         accelerator.init_trackers(
             project_name=getattr(wandb_conf, "project", "deep-compressor"),
-            config=config.to_dict(),
+            config=flat_config,
             init_kwargs=init_kwargs,
         )
 
@@ -469,7 +599,13 @@ def main_legacy():
     parser.add_argument("--wandb_entity", type=str, default=None,
                         help="wandb entity (team/user)")
     parser.add_argument("--wandb_run_name", type=str, default=None,
-                        help="wandb run name")
+                        help="wandb run name (auto-generated if not set)")
+    parser.add_argument("--wandb_tags", type=str, default=None,
+                        help="Comma-separated wandb tags (merged with auto tags)")
+    parser.add_argument("--wandb_group", type=str, default=None,
+                        help="wandb group for grouping related runs")
+    parser.add_argument("--wandb_notes", type=str, default=None,
+                        help="wandb run notes/description")
     parser.add_argument("--wandb_offline", action="store_true",
                         help="Use wandb in offline mode")
     # Diagnostic callback options
@@ -483,18 +619,8 @@ def main_legacy():
 
     config = DeepCompressorConfig.from_yaml(args.config)
 
-    # Build wandb config from CLI flags
-    wandb_conf = None
-    if args.wandb:
-        from types import SimpleNamespace
-        wandb_conf = SimpleNamespace(
-            enabled=True,
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            run_name=args.wandb_run_name,
-            tags=[],
-            offline=args.wandb_offline,
-        )
+    # Build wandb config from CLI flags (auto-generates name/tags if not set)
+    wandb_conf = build_wandb_conf(args)
 
     # Build diagnostic callback if requested
     diag_callback = None

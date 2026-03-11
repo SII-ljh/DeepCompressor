@@ -115,6 +115,8 @@ class WandbConf:
     entity: Optional[str] = None
     run_name: Optional[str] = None
     tags: List[str] = field(default_factory=list)
+    group: Optional[str] = None
+    notes: Optional[str] = None
     offline: bool = False
 
 

@@ -58,6 +58,8 @@ wandb:
   enabled: true
   project: deep-compressor
   entity: null
-  run_name: null
-  tags: []
+  run_name: null                   # auto-generated if null: q{Q}_lr{LR}_{model}_{timestamp}
+  tags: []                         # merged with auto-generated tags
+  group: null                      # group related runs (e.g., "ablation-v2")
+  notes: null                      # run description
   offline: false

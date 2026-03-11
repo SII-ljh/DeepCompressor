@@ -84,4 +84,6 @@ wandb:
   entity: null
   run_name: null
   tags: []
+  group: null
+  notes: null
   offline: false

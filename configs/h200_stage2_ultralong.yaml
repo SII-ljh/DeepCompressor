@@ -58,6 +58,8 @@ wandb:
   project: deep-compressor
   run_name: "stage2-8xH200-ultralong-8192tok"
   tags: ["stage2", "8xH200", "ultralong", "8192-tokens"]
+  group: "stage2-h200"
+  notes: null
 
 # ── Memory Requirements ──
 # Per GPU (H200 80GB):
