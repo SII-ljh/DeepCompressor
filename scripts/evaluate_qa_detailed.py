@@ -414,18 +414,36 @@ def _apply_chat_template(tokenizer, context: str, question: str,
          "content": f"Context: {context}\n\nQuestion: {question}"},
     ]
     try:
-        return tokenizer.apply_chat_template(
+        prompt = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True,
             tokenize=False, enable_thinking=enable_thinking)
     except TypeError:
-        # Older tokenizer without enable_thinking kwarg
-        return tokenizer.apply_chat_template(
+        # Older tokenizer without enable_thinking kwarg — manually add
+        # empty thinking block so the model skips reasoning.
+        prompt = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False)
+        if not enable_thinking:
+            prompt += "<think>\n</think>\n\n"
+    return prompt
 
 
 def _strip_thinking(text: str) -> str:
-    """Remove ``<think>…</think>`` blocks from generated text."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """Remove ``<think>…</think>`` blocks from generated text.
+
+    Handles three cases:
+    1. Closed blocks: ``<think>…</think>`` — remove entirely
+    2. Unclosed blocks: ``<think>…`` (model ran out of tokens) — remove to end
+    3. Tags stripped by skip_special_tokens: bare thinking content before
+       the actual answer (heuristic: strip up to ``</think>`` even without
+       opening tag, since skip_special_tokens may remove it)
+    """
+    # 1. Remove closed thinking blocks
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # 2. Remove unclosed thinking blocks (model hit max_new_tokens mid-thought)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+    # 3. Remove residual </think> tag and anything before it (stripped opening)
+    text = re.sub(r".*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 @torch.no_grad()
@@ -522,8 +540,15 @@ def evaluate_baseline_qa(
             repetition_penalty=1.2,
         )
         gen_only = gen_out[:, max_plen:]
-        preds_raw = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
-        preds = [_strip_thinking(p) for p in preds_raw]
+        # Decode WITHOUT skip_special_tokens so <think>...</think> tags
+        # are preserved for _strip_thinking to match.  Clean up remaining
+        # special tokens (e.g. <|im_end|>) afterwards.
+        preds_raw = tokenizer.batch_decode(gen_only, skip_special_tokens=False)
+        preds = []
+        for p in preds_raw:
+            p = _strip_thinking(p)
+            p = re.sub(r'<\|[^|]*\|>', '', p).strip()
+            preds.append(p)
 
         # ── Collect per-sample metrics ────────────────────────────────
         for i, (pred, gold) in enumerate(zip(preds, golds)):
@@ -851,7 +876,17 @@ def main():
                         help="Markdown report path (default: results/qa_eval_report.md)")
     parser.add_argument("--csv", type=str, default=None,
                         help="Also save CSV summary")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="DataLoader num_workers per process (default=4)")
+    parser.add_argument("--flash_attn", action="store_true", default=True,
+                        help="Use flash_attention_2 for baseline models (default=True)")
+    parser.add_argument("--no_flash_attn", action="store_true",
+                        help="Disable flash_attention_2")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile() for speedup")
     args = parser.parse_args()
+    if args.no_flash_attn:
+        args.flash_attn = False
 
     # ── Discover checkpoints ──
     if args.checkpoints:
@@ -904,23 +939,43 @@ def main():
         print(f"  Device:      {accelerator.device}")
         print()
 
-    # ── Load tokenizer ──
+    # ── Load shared tokenizer (for compressed models using Qwen3-0.6B) ──
+    ref_config = DeepCompressorConfig.from_yaml(str(entries[0][1]))
+    shared_tokenizer_path = ref_config.qwen.model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(
-        "models/Qwen3-0.6B", trust_remote_code=True, fix_mistral_regex=True)
+        shared_tokenizer_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Decoder-only models require left-padding for batched generation.
-    # PaddingCollator does its own manual right-padding (unaffected by this),
-    # so this only tells HF's generate() the correct padding direction.
     tokenizer.padding_side = "left"
 
-    # ── Shared data loading helpers ──
-    # Use first compressed model's config for data params (doc/question/answer lengths).
-    # Baselines and compressed models eval on the same data split for fair comparison.
-    ref_config = DeepCompressorConfig.from_yaml(str(entries[0][1]))
+    # Shared data params from first compressed model's config.
     max_doc = ref_config.qwen.max_doc_tokens
     max_q = ref_config.qwen.max_question_tokens
     max_ans = ref_config.qwen.max_answer_tokens
+
+    # ── Pre-load shared datasets (reused across models) ──
+    nw = 0 if accelerator.device.type == "mps" else args.num_workers
+    pin = accelerator.device.type == "cuda"
+
+    if is_main:
+        print(f"  Loading datasets...")
+    shared_dev_ds = QADataset(
+        args.eval_data, tokenizer,
+        max_doc_tokens=max_doc, max_question_tokens=max_q,
+        max_answer_tokens=max_ans,
+    )
+    if args.max_eval_samples > 0 and args.max_eval_samples < len(shared_dev_ds):
+        shared_dev_ds = Subset(shared_dev_ds, list(range(args.max_eval_samples)))
+
+    shared_train_ds = None
+    if args.train_peek_samples > 0 and os.path.exists(args.train_data):
+        shared_train_ds = QADataset(
+            args.train_data, tokenizer,
+            max_doc_tokens=max_doc, max_question_tokens=max_q,
+            max_answer_tokens=max_ans,
+        )
+        if args.train_peek_samples < len(shared_train_ds):
+            shared_train_ds = Subset(shared_train_ds, list(range(args.train_peek_samples)))
 
     # ── Evaluate each model ──
     all_results: List[ModelResult] = []
@@ -934,44 +989,44 @@ def main():
                 print(f"  {BOLD}{display_name} (baseline){RESET}  ({model_path})")
                 print(f"  Loading model...")
 
-            qwen = AutoModelForCausalLM.from_pretrained(
-                model_path, trust_remote_code=True,
+            # Load model-specific tokenizer (chat template may differ per model size)
+            bl_tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=True)
+            if bl_tokenizer.pad_token is None:
+                bl_tokenizer.pad_token = bl_tokenizer.eos_token
+            bl_tokenizer.padding_side = "left"
+
+            load_kwargs = dict(
+                trust_remote_code=True,
                 torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             )
+            if args.flash_attn and torch.cuda.is_available():
+                load_kwargs["attn_implementation"] = "flash_attention_2"
+            qwen = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
             qwen.eval()
             for p in qwen.parameters():
                 p.requires_grad = False
+            if args.compile and hasattr(torch, "compile"):
+                qwen = torch.compile(qwen)
             qwen = accelerator.prepare(qwen)
 
-            collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
-            nw = 0 if accelerator.device.type == "mps" else 2
-            pin = accelerator.device.type == "cuda"
-            bs = args.batch_size if args.batch_size > 0 else 8  # conservative for full-context
+            collator = PaddingCollator(pad_token_id=bl_tokenizer.pad_token_id)
+            bs = args.batch_size if args.batch_size > 0 else 16
 
             mr = ModelResult(
                 name=display_name, q_value=0,
                 config_path="", checkpoint_path=model_path,
             )
 
-            # Dev
-            if is_main:
-                print(f"  Loading dev data...")
-            dev_ds = QADataset(
-                args.eval_data, tokenizer,
-                max_doc_tokens=max_doc, max_question_tokens=max_q,
-                max_answer_tokens=max_ans,
-            )
-            if args.max_eval_samples > 0 and args.max_eval_samples < len(dev_ds):
-                dev_ds = Subset(dev_ds, list(range(args.max_eval_samples)))
-
-            dev_loader = DataLoader(dev_ds, batch_size=bs, shuffle=False,
+            # Dev — reuse pre-loaded dataset
+            dev_loader = DataLoader(shared_dev_ds, batch_size=bs, shuffle=False,
                                     collate_fn=collator, num_workers=nw, pin_memory=pin)
             dev_loader = accelerator.prepare(dev_loader)
 
             dev_m, dev_s = evaluate_baseline_qa(
-                qwen, dev_loader, tokenizer, accelerator,
+                qwen, dev_loader, bl_tokenizer, accelerator,
                 max_new_tokens=max_ans, source_label="dev",
-                total_samples=len(dev_ds))
+                total_samples=len(shared_dev_ds))
 
             mr.dev_loss = dev_m["loss"]
             mr.dev_ppl = dev_m["perplexity"]
@@ -987,24 +1042,16 @@ def main():
                       f"EM={mr.dev_em:.2%}  F1={mr.dev_f1:.4f}  "
                       f"Empty={mr.dev_empty_preds}/{mr.dev_n}")
 
-            # Train peek
-            if args.train_peek_samples > 0 and os.path.exists(args.train_data):
-                train_ds = QADataset(
-                    args.train_data, tokenizer,
-                    max_doc_tokens=max_doc, max_question_tokens=max_q,
-                    max_answer_tokens=max_ans,
-                )
-                if args.train_peek_samples < len(train_ds):
-                    train_ds = Subset(train_ds, list(range(args.train_peek_samples)))
-
-                train_loader = DataLoader(train_ds, batch_size=bs, shuffle=False,
+            # Train peek — reuse pre-loaded dataset
+            if shared_train_ds is not None:
+                train_loader = DataLoader(shared_train_ds, batch_size=bs, shuffle=False,
                                           collate_fn=collator, num_workers=nw, pin_memory=pin)
                 train_loader = accelerator.prepare(train_loader)
 
                 tr_m, tr_s = evaluate_baseline_qa(
-                    qwen, train_loader, tokenizer, accelerator,
+                    qwen, train_loader, bl_tokenizer, accelerator,
                     max_new_tokens=max_ans, source_label="train",
-                    total_samples=len(train_ds))
+                    total_samples=len(shared_train_ds))
 
                 mr.train_loss = tr_m["loss"]
                 mr.train_ppl = tr_m["perplexity"]
@@ -1033,36 +1080,23 @@ def main():
 
         model, config = load_model(ckpt_dir, config_path, accelerator)
         bs = args.batch_size if args.batch_size > 0 else config.training.batch_size
-        max_ans = config.qwen.max_answer_tokens
+        comp_max_ans = config.qwen.max_answer_tokens
         collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
-        nw = 0 if accelerator.device.type == "mps" else 2
-        pin = accelerator.device.type == "cuda"
 
         mr = ModelResult(
             name=f"Q={q_value}", q_value=q_value,
             config_path=str(config_path), checkpoint_path=str(ckpt_dir),
         )
 
-        # Dev
-        if is_main:
-            print(f"  Loading dev data...")
-        dev_ds = QADataset(
-            args.eval_data, tokenizer,
-            max_doc_tokens=config.qwen.max_doc_tokens,
-            max_question_tokens=config.qwen.max_question_tokens,
-            max_answer_tokens=config.qwen.max_answer_tokens,
-        )
-        if args.max_eval_samples > 0 and args.max_eval_samples < len(dev_ds):
-            dev_ds = Subset(dev_ds, list(range(args.max_eval_samples)))
-
-        dev_loader = DataLoader(dev_ds, batch_size=bs, shuffle=False,
+        # Dev — reuse pre-loaded dataset
+        dev_loader = DataLoader(shared_dev_ds, batch_size=bs, shuffle=False,
                                 collate_fn=collator, num_workers=nw, pin_memory=pin)
         dev_loader = accelerator.prepare(dev_loader)
 
         dev_m, dev_s = evaluate_qa_detailed(
             model, dev_loader, tokenizer, accelerator,
-            max_new_tokens=max_ans, source_label="dev",
-            total_samples=len(dev_ds))
+            max_new_tokens=comp_max_ans, source_label="dev",
+            total_samples=len(shared_dev_ds))
 
         mr.dev_loss = dev_m["loss"]
         mr.dev_ppl = dev_m["perplexity"]
@@ -1078,25 +1112,16 @@ def main():
                   f"EM={mr.dev_em:.2%}  F1={mr.dev_f1:.4f}  "
                   f"Empty={mr.dev_empty_preds}/{mr.dev_n}")
 
-        # Train peek
-        if args.train_peek_samples > 0 and os.path.exists(args.train_data):
-            train_ds = QADataset(
-                args.train_data, tokenizer,
-                max_doc_tokens=config.qwen.max_doc_tokens,
-                max_question_tokens=config.qwen.max_question_tokens,
-                max_answer_tokens=config.qwen.max_answer_tokens,
-            )
-            if args.train_peek_samples < len(train_ds):
-                train_ds = Subset(train_ds, list(range(args.train_peek_samples)))
-
-            train_loader = DataLoader(train_ds, batch_size=bs, shuffle=False,
+        # Train peek — reuse pre-loaded dataset
+        if shared_train_ds is not None:
+            train_loader = DataLoader(shared_train_ds, batch_size=bs, shuffle=False,
                                       collate_fn=collator, num_workers=nw, pin_memory=pin)
             train_loader = accelerator.prepare(train_loader)
 
             tr_m, tr_s = evaluate_qa_detailed(
                 model, train_loader, tokenizer, accelerator,
-                max_new_tokens=max_ans, source_label="train",
-                total_samples=len(train_ds))
+                max_new_tokens=comp_max_ans, source_label="train",
+                total_samples=len(shared_train_ds))
 
             mr.train_loss = tr_m["loss"]
             mr.train_ppl = tr_m["perplexity"]

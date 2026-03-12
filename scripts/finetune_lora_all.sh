@@ -16,7 +16,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 NGPUS="${NGPUS:-8}"
 DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
-NUM_EPOCHS="${NUM_EPOCHS:-2}"
+NUM_EPOCHS="${NUM_EPOCHS:-1}"
 MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
 
 # Model sizes and their per-GPU batch sizes (tuned for 8x H200 141GB)
@@ -121,7 +121,7 @@ for SIZE in "${SIZES[@]}"; do
         --gradient_accumulation "$GA" \
         --max_eval_samples "$MAX_EVAL_SAMPLES" \
         --gradient_checkpointing \
-        --eval_every_steps 500 \
+        --eval_every_steps 250 \
         --output_dir "$OUTPUT_DIR" \
         2>&1 | tee "${OUTPUT_DIR}_training.log"
 

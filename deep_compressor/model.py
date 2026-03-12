@@ -234,17 +234,19 @@ class DeepCompressor(nn.Module):
             left_embeds[i, max_len - slen:] = combined_embeds[i, :slen]
             left_mask[i, max_len - slen:] = 1
 
+        # Use the model's default eos_token_id list (e.g. [151645, 151643]
+        # for Qwen3) instead of tokenizer.eos_token_id (single int) so that
+        # both <|im_end|> and <|endoftext|> properly stop generation.
         out = self.qwen.generate(
             inputs_embeds=left_embeds,
             attention_mask=left_mask,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
             repetition_penalty=1.2,
         )
-        # With inputs_embeds, generate() returns ONLY generated tokens
-        # (no input positions to strip), so return as-is.
+        # With inputs_embeds (transformers>=4.40), generate() returns ONLY
+        # generated tokens (no input positions to strip), so return as-is.
         return out
 
     def forward_qa(self, doc_input_ids: torch.Tensor, doc_attention_mask: torch.Tensor,

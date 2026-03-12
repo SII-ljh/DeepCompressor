@@ -20,6 +20,25 @@ from torch.utils.data import DataLoader
 logger = logging.getLogger(__name__)
 
 
+def _strip_thinking(text: str) -> str:
+    """Remove ``<think>…</think>`` blocks from generated text.
+
+    Handles three cases:
+    1. Closed blocks: ``<think>…</think>`` — remove entirely
+    2. Unclosed blocks: ``<think>…`` (model ran out of tokens) — remove to end
+    3. Tags stripped by skip_special_tokens: bare thinking content before
+       the actual answer (heuristic: strip up to ``</think>`` even without
+       opening tag, since skip_special_tokens may remove it)
+    """
+    # 1. Remove closed thinking blocks
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # 2. Remove unclosed thinking blocks (model hit max_new_tokens mid-thought)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+    # 3. Remove residual </think> tag and anything before it (stripped opening)
+    text = re.sub(r".*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
 def normalize_text(s: str) -> str:
     """Lowercase, remove punctuation, strip whitespace. Works for Chinese + English."""
     s = s.lower()
@@ -269,8 +288,14 @@ def evaluate_qa(model, eval_loader: DataLoader, tokenizer,
             tokenizer=tokenizer, max_new_tokens=max_new_tokens,
         )
 
-        # Decode predictions
-        preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        # Decode predictions — use skip_special_tokens=False so <think>/<think>
+        # tags are preserved for _strip_thinking to match, then clean up.
+        preds_raw = tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
+        preds = []
+        for p in preds_raw:
+            p = _strip_thinking(p)
+            p = re.sub(r'<\|[^|]*\|>', '', p).strip()
+            preds.append(p)
         golds = batch["answer_text"]  # list of str
 
         # Store samples for display (only from main process, only first few)
