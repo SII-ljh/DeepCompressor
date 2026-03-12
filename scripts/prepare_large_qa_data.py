@@ -33,6 +33,8 @@ Usage:
 import argparse
 import json
 import random
+import sys
+import time
 import traceback
 import unicodedata
 from collections import Counter
@@ -51,6 +53,98 @@ def _normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = " ".join(text.split())
     return text
+
+
+# ========== Progress helpers ==========
+
+def _iter_with_progress(iterable, desc="Processing", every=10000):
+    """Wrap an iterable to print progress every `every` items.
+
+    Crucial for streaming datasets where download happens during iteration.
+    """
+    count = 0
+    t0 = time.time()
+    last_print = t0
+    for item in iterable:
+        count += 1
+        now = time.time()
+        # Print every N items OR every 30 seconds (whichever comes first)
+        if count % every == 0 or (now - last_print) >= 30:
+            elapsed = now - t0
+            rate = count / max(elapsed, 0.01)
+            print(f"    ... {desc}: {count:,} rows downloaded ({elapsed:.0f}s, {rate:.0f} rows/s)",
+                  flush=True)
+            last_print = now
+        yield item
+    elapsed = time.time() - t0
+    rate = count / max(elapsed, 0.01)
+    print(f"    ... {desc}: {count:,} rows total ({elapsed:.0f}s, {rate:.0f} rows/s)", flush=True)
+
+
+class _Timer:
+    """Simple context manager to track and print elapsed time."""
+    def __init__(self, label):
+        self.label = label
+        self.t0 = None
+
+    def __enter__(self):
+        self.t0 = time.time()
+        return self
+
+    def __exit__(self, *args):
+        elapsed = time.time() - self.t0
+        print(f"  [{self.label}] elapsed: {elapsed:.1f}s", flush=True)
+
+
+# ========== Dataset cache for resume support ==========
+
+CACHE_DIR = DATA_DIR / ".qa_cache"
+
+
+def _cache_path(name: str) -> Path:
+    return CACHE_DIR / f"{name}.json"
+
+
+def _cache_exists(name: str) -> bool:
+    return _cache_path(name).exists()
+
+
+def _cache_save(name: str, train: list, dev: list):
+    """Save dataset results to cache so we can skip re-downloading."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_cache_path(name), "w", encoding="utf-8") as f:
+        json.dump({"train": train, "dev": dev}, f, ensure_ascii=False)
+    print(f"    -> cached to {_cache_path(name).name} "
+          f"(train={len(train):,}, dev={len(dev):,})", flush=True)
+
+
+def _cache_load(name: str) -> tuple:
+    """Load cached dataset. Returns (train_list, dev_list)."""
+    with open(_cache_path(name), "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data["train"], data["dev"]
+
+
+def _try_load_cache(name: str, train_all: list, dev_all: list) -> bool:
+    """If cache exists, load it into train_all/dev_all and return True."""
+    if not _cache_exists(name):
+        return False
+    cached_train, cached_dev = _cache_load(name)
+    train_all.extend(cached_train)
+    dev_all.extend(cached_dev)
+    print(f"  CACHED: train={len(cached_train):,}, dev={len(cached_dev):,} "
+          f"(from {_cache_path(name).name})", flush=True)
+    return True
+
+
+def clear_cache():
+    """Delete all cached dataset files."""
+    if CACHE_DIR.exists():
+        import shutil
+        shutil.rmtree(CACHE_DIR)
+        print(f"Cache cleared: {CACHE_DIR}", flush=True)
+    else:
+        print("No cache to clear.", flush=True)
 
 
 # ========== Conversion functions ==========
@@ -620,8 +714,12 @@ def report_duplicates(samples: list, label: str = "data"):
 # ========== Main download function ==========
 
 def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
-                          only_english: bool = False):
-    """Download, clean, and merge large-scale QA datasets."""
+                          only_english: bool = False, no_cache: bool = False):
+    """Download, clean, and merge large-scale QA datasets.
+
+    Supports resume: each dataset is cached after download. Re-running
+    skips already-cached datasets. Use --no-cache to force re-download.
+    """
     from datasets import load_dataset
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -635,12 +733,24 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
 
     total_datasets = 16
     idx = 0
+    global_t0 = time.time()
 
-    print("=" * 70)
-    print(f"Preparing Large-Scale QA Data ({'TEST MODE' if test_mode else 'FULL MODE'})")
-    print(f"Target: {total_datasets} datasets")
-    print("=" * 70)
-    print()
+    # Cache info
+    if no_cache:
+        cache_status = "DISABLED (--no-cache)"
+    elif CACHE_DIR.exists():
+        cached_files = list(CACHE_DIR.glob("*.json"))
+        cache_status = f"ENABLED ({len(cached_files)} datasets cached, will resume)"
+    else:
+        cache_status = "ENABLED (empty, first run)"
+
+    print("=" * 70, flush=True)
+    print(f"Preparing Large-Scale QA Data ({'TEST MODE' if test_mode else 'FULL MODE'})", flush=True)
+    print(f"Target: {total_datasets} datasets", flush=True)
+    print(f"Cache: {cache_status}", flush=True)
+    print(f"Cache dir: {CACHE_DIR}", flush=True)
+    print("=" * 70, flush=True)
+    print(flush=True)
 
     skip_chinese = only_english
     skip_english = only_chinese
@@ -650,89 +760,138 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
     if not skip_english:
         # 1. SQuAD v1.1
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading SQuAD v1.1 ...")
-        try:
-            sq1_train = _convert_squad(load_dataset("rajpurkar/squad", split="train"),
-                                       max_train, source="squad_v1")
-            sq1_dev = _convert_squad(load_dataset("rajpurkar/squad", split="validation"),
-                                     max_dev, source="squad_v1")
-            train_all.extend(sq1_train)
-            dev_all.extend(sq1_dev)
-            print(f"  OK SQuAD v1: train={len(sq1_train):,}, dev={len(sq1_dev):,}")
-        except Exception as e:
-            print(f"  FAIL SQuAD v1: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] SQuAD v1.1", flush=True)
+        if not no_cache and _try_load_cache("squad_v1", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("SQuAD v1"):
+                    print("    downloading train split ...", flush=True)
+                    sq1_train = _convert_squad(load_dataset("rajpurkar/squad", split="train"),
+                                               max_train, source="squad_v1")
+                    print("    downloading validation split ...", flush=True)
+                    sq1_dev = _convert_squad(load_dataset("rajpurkar/squad", split="validation"),
+                                             max_dev, source="squad_v1")
+                    train_all.extend(sq1_train)
+                    dev_all.extend(sq1_dev)
+                    print(f"  OK SQuAD v1: train={len(sq1_train):,}, dev={len(sq1_dev):,}", flush=True)
+                    _cache_save("squad_v1", sq1_train, sq1_dev)
+            except Exception as e:
+                print(f"  FAIL SQuAD v1: {e}", flush=True)
+                traceback.print_exc()
 
         # 2. SQuAD v2.0 (with unanswerable - will be removed in cleaning)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading SQuAD v2.0 ...")
-        try:
-            sq2_train = _convert_squad(load_dataset("rajpurkar/squad_v2", split="train"),
-                                       max_train, source="squad_v2",
-                                       include_unanswerable=True)
-            sq2_dev = _convert_squad(load_dataset("rajpurkar/squad_v2", split="validation"),
-                                     max_dev, source="squad_v2",
-                                     include_unanswerable=True)
-            train_all.extend(sq2_train)
-            dev_all.extend(sq2_dev)
-            print(f"  OK SQuAD v2: train={len(sq2_train):,}, dev={len(sq2_dev):,}")
-        except Exception as e:
-            print(f"  FAIL SQuAD v2: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] SQuAD v2.0", flush=True)
+        if not no_cache and _try_load_cache("squad_v2", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("SQuAD v2"):
+                    print("    downloading train split ...", flush=True)
+                    sq2_train = _convert_squad(load_dataset("rajpurkar/squad_v2", split="train"),
+                                               max_train, source="squad_v2",
+                                               include_unanswerable=True)
+                    print("    downloading validation split ...", flush=True)
+                    sq2_dev = _convert_squad(load_dataset("rajpurkar/squad_v2", split="validation"),
+                                             max_dev, source="squad_v2",
+                                             include_unanswerable=True)
+                    train_all.extend(sq2_train)
+                    dev_all.extend(sq2_dev)
+                    print(f"  OK SQuAD v2: train={len(sq2_train):,}, dev={len(sq2_dev):,}", flush=True)
+                    _cache_save("squad_v2", sq2_train, sq2_dev)
+            except Exception as e:
+                print(f"  FAIL SQuAD v2: {e}", flush=True)
+                traceback.print_exc()
 
         # 3. TriviaQA
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading TriviaQA (streaming) ...")
-        try:
-            tqa_train = _convert_triviaqa(
-                load_dataset("trivia_qa", "rc", split="train", streaming=True),
-                max_train, source="triviaqa")
-            tqa_dev = _convert_triviaqa(
-                load_dataset("trivia_qa", "rc", split="validation", streaming=True),
-                max_dev, source="triviaqa")
-            train_all.extend(tqa_train)
-            dev_all.extend(tqa_dev)
-            print(f"  OK TriviaQA: train={len(tqa_train):,}, dev={len(tqa_dev):,}")
-        except Exception as e:
-            print(f"  FAIL TriviaQA: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] TriviaQA", flush=True)
+        if not no_cache and _try_load_cache("triviaqa", train_all, dev_all):
+            pass
+        else:
+            print("  Loading (streaming) ...", flush=True)
+            try:
+                with _Timer("TriviaQA"):
+                    print("    streaming train split ...", flush=True)
+                    tqa_train = _convert_triviaqa(
+                        _iter_with_progress(
+                            load_dataset("trivia_qa", "rc", split="train", streaming=True),
+                            desc="TriviaQA train", every=10000),
+                        max_train, source="triviaqa")
+                    print("    streaming validation split ...", flush=True)
+                    tqa_dev = _convert_triviaqa(
+                        _iter_with_progress(
+                            load_dataset("trivia_qa", "rc", split="validation", streaming=True),
+                            desc="TriviaQA dev", every=5000),
+                        max_dev, source="triviaqa")
+                    train_all.extend(tqa_train)
+                    dev_all.extend(tqa_dev)
+                    print(f"  OK TriviaQA: train={len(tqa_train):,}, dev={len(tqa_dev):,}", flush=True)
+                    _cache_save("triviaqa", tqa_train, tqa_dev)
+            except Exception as e:
+                print(f"  FAIL TriviaQA: {e}", flush=True)
+                traceback.print_exc()
 
         # 4. Natural Questions (no cap — conversion filters for short answers)
         idx += 1
         if not test_mode:
-            print(f"[{idx}/{total_datasets}] Loading Natural Questions (streaming, may take time) ...")
-            try:
-                nq_train = _convert_natural_questions(
-                    load_dataset("natural_questions", split="train", streaming=True),
-                    max_n=0, source="natural_questions")
-                nq_dev = _convert_natural_questions(
-                    load_dataset("natural_questions", split="validation", streaming=True),
-                    max_dev, source="natural_questions")
-                train_all.extend(nq_train)
-                dev_all.extend(nq_dev)
-                print(f"  OK Natural Questions: train={len(nq_train):,}, dev={len(nq_dev):,}")
-            except Exception as e:
-                print(f"  FAIL Natural Questions: {e}")
-                traceback.print_exc()
+            print(f"[{idx}/{total_datasets}] Natural Questions", flush=True)
+            if not no_cache and _try_load_cache("natural_questions", train_all, dev_all):
+                pass
+            else:
+                print("  Loading (streaming, ~307K rows, may take 10-30 min) ...", flush=True)
+                try:
+                    with _Timer("Natural Questions"):
+                        print("    streaming train split (287 parquet files) ...", flush=True)
+                        nq_train = _convert_natural_questions(
+                            _iter_with_progress(
+                                load_dataset("natural_questions", split="train", streaming=True),
+                                desc="NQ train", every=5000),
+                            max_n=0, source="natural_questions")
+                        print(f"    train done: {len(nq_train):,} samples kept", flush=True)
+                        print("    streaming validation split ...", flush=True)
+                        nq_dev = _convert_natural_questions(
+                            _iter_with_progress(
+                                load_dataset("natural_questions", split="validation", streaming=True),
+                                desc="NQ dev", every=1000),
+                            max_dev, source="natural_questions")
+                        train_all.extend(nq_train)
+                        dev_all.extend(nq_dev)
+                        print(f"  OK Natural Questions: train={len(nq_train):,}, dev={len(nq_dev):,}", flush=True)
+                        _cache_save("natural_questions", nq_train, nq_dev)
+                except Exception as e:
+                    print(f"  FAIL Natural Questions: {e}", flush=True)
+                    traceback.print_exc()
         else:
-            print(f"[{idx}/{total_datasets}] Natural Questions: skipped in test mode")
+            print(f"[{idx}/{total_datasets}] Natural Questions: skipped in test mode", flush=True)
 
         # 5. HotpotQA
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading HotpotQA ...")
-        try:
-            hpqa_train = _convert_hotpotqa(
-                load_dataset("hotpot_qa", "distractor", split="train"),
-                max_train, source="hotpotqa")
-            hpqa_dev = _convert_hotpotqa(
-                load_dataset("hotpot_qa", "distractor", split="validation"),
-                max_dev, source="hotpotqa")
-            train_all.extend(hpqa_train)
-            dev_all.extend(hpqa_dev)
-            print(f"  OK HotpotQA: train={len(hpqa_train):,}, dev={len(hpqa_dev):,}")
-        except Exception as e:
-            print(f"  FAIL HotpotQA: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] HotpotQA", flush=True)
+        if not no_cache and _try_load_cache("hotpotqa", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("HotpotQA"):
+                    print("    downloading train split ...", flush=True)
+                    hpqa_train = _convert_hotpotqa(
+                        load_dataset("hotpot_qa", "distractor", split="train"),
+                        max_train, source="hotpotqa")
+                    print("    downloading validation split ...", flush=True)
+                    hpqa_dev = _convert_hotpotqa(
+                        load_dataset("hotpot_qa", "distractor", split="validation"),
+                        max_dev, source="hotpotqa")
+                    train_all.extend(hpqa_train)
+                    dev_all.extend(hpqa_dev)
+                    print(f"  OK HotpotQA: train={len(hpqa_train):,}, dev={len(hpqa_dev):,}", flush=True)
+                    _cache_save("hotpotqa", hpqa_train, hpqa_dev)
+            except Exception as e:
+                print(f"  FAIL HotpotQA: {e}", flush=True)
+                traceback.print_exc()
 
         # 6. QuAC (conversational QA)
         # NOTE: allenai/quac uses legacy dataset scripts, no parquet alternative.
@@ -743,96 +902,123 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
 
         # 7. DROP (discrete reasoning)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading DROP ...")
-        try:
-            drop_loaded = False
-            for repo in ["ucinlp/drop", "drop"]:
-                try:
-                    drop_train = _convert_drop(
-                        load_dataset(repo, split="train"),
-                        max_train, source="drop")
-                    drop_dev = _convert_drop(
-                        load_dataset(repo, split="validation"),
-                        max_dev, source="drop")
-                    train_all.extend(drop_train)
-                    dev_all.extend(drop_dev)
-                    print(f"  OK DROP: train={len(drop_train):,}, dev={len(drop_dev):,}")
-                    drop_loaded = True
-                    break
-                except Exception:
-                    continue
-            if not drop_loaded:
-                print(f"  FAIL DROP: all repos failed")
-        except Exception as e:
-            print(f"  FAIL DROP: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] DROP", flush=True)
+        if not no_cache and _try_load_cache("drop", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("DROP"):
+                    drop_loaded = False
+                    for repo in ["ucinlp/drop", "drop"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            drop_train = _convert_drop(
+                                load_dataset(repo, split="train"),
+                                max_train, source="drop")
+                            drop_dev = _convert_drop(
+                                load_dataset(repo, split="validation"),
+                                max_dev, source="drop")
+                            train_all.extend(drop_train)
+                            dev_all.extend(drop_dev)
+                            print(f"  OK DROP: train={len(drop_train):,}, dev={len(drop_dev):,}", flush=True)
+                            _cache_save("drop", drop_train, drop_dev)
+                            drop_loaded = True
+                            break
+                        except Exception:
+                            continue
+                    if not drop_loaded:
+                        print(f"  FAIL DROP: all repos failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL DROP: {e}", flush=True)
+                traceback.print_exc()
 
         # 8. AdversarialQA (SQuAD-format adversarial examples)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading AdversarialQA ...")
-        try:
-            adv_loaded = False
-            for config_name in ["adversarialQA", "dbpedia_based_adversarialQA",
-                                "squad_adversarialQA"]:
-                try:
-                    adv_train = _convert_squad(
-                        load_dataset("adversarial_qa", config_name, split="train"),
-                        max_train, source="adversarial_qa")
-                    adv_dev = _convert_squad(
-                        load_dataset("adversarial_qa", config_name, split="validation"),
-                        max_dev, source="adversarial_qa")
-                    train_all.extend(adv_train)
-                    dev_all.extend(adv_dev)
-                    print(f"  OK AdversarialQA ({config_name}): "
-                          f"train={len(adv_train):,}, dev={len(adv_dev):,}")
-                    adv_loaded = True
-                except Exception as e2:
-                    print(f"    - config '{config_name}' failed: {e2}")
-                    continue
-            if not adv_loaded:
-                # Try without config
-                try:
-                    adv_train = _convert_squad(
-                        load_dataset("adversarial_qa", split="train"),
-                        max_train, source="adversarial_qa")
-                    adv_dev = _convert_squad(
-                        load_dataset("adversarial_qa", split="validation"),
-                        max_dev, source="adversarial_qa")
-                    train_all.extend(adv_train)
-                    dev_all.extend(adv_dev)
-                    print(f"  OK AdversarialQA: train={len(adv_train):,}, dev={len(adv_dev):,}")
-                except Exception:
-                    print(f"  FAIL AdversarialQA: all configs failed")
-        except Exception as e:
-            print(f"  FAIL AdversarialQA: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] AdversarialQA", flush=True)
+        if not no_cache and _try_load_cache("adversarial_qa", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("AdversarialQA"):
+                    adv_loaded = False
+                    for config_name in ["adversarialQA", "dbpedia_based_adversarialQA",
+                                        "squad_adversarialQA"]:
+                        try:
+                            print(f"    trying config: {config_name} ...", flush=True)
+                            adv_train = _convert_squad(
+                                load_dataset("adversarial_qa", config_name, split="train"),
+                                max_train, source="adversarial_qa")
+                            adv_dev = _convert_squad(
+                                load_dataset("adversarial_qa", config_name, split="validation"),
+                                max_dev, source="adversarial_qa")
+                            train_all.extend(adv_train)
+                            dev_all.extend(adv_dev)
+                            print(f"  OK AdversarialQA ({config_name}): "
+                                  f"train={len(adv_train):,}, dev={len(adv_dev):,}", flush=True)
+                            _cache_save("adversarial_qa", adv_train, adv_dev)
+                            adv_loaded = True
+                        except Exception as e2:
+                            print(f"    - config '{config_name}' failed: {e2}", flush=True)
+                            continue
+                    if not adv_loaded:
+                        # Try without config
+                        try:
+                            print(f"    trying without config ...", flush=True)
+                            adv_train = _convert_squad(
+                                load_dataset("adversarial_qa", split="train"),
+                                max_train, source="adversarial_qa")
+                            adv_dev = _convert_squad(
+                                load_dataset("adversarial_qa", split="validation"),
+                                max_dev, source="adversarial_qa")
+                            train_all.extend(adv_train)
+                            dev_all.extend(adv_dev)
+                            print(f"  OK AdversarialQA: train={len(adv_train):,}, dev={len(adv_dev):,}", flush=True)
+                            _cache_save("adversarial_qa", adv_train, adv_dev)
+                        except Exception:
+                            print(f"  FAIL AdversarialQA: all configs failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL AdversarialQA: {e}", flush=True)
+                traceback.print_exc()
 
         # 9. DuoRC (SelfRC — movie plot QA)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading DuoRC (SelfRC) ...")
-        try:
-            duo_loaded = False
-            for config_name in ["SelfRC", "ParaphraseRC"]:
-                try:
-                    duo_train = _convert_duorc(
-                        load_dataset("duorc", config_name, split="train"),
-                        max_train, source=f"duorc_{config_name.lower()}")
-                    duo_dev = _convert_duorc(
-                        load_dataset("duorc", config_name, split="validation"),
-                        max_dev, source=f"duorc_{config_name.lower()}")
-                    train_all.extend(duo_train)
-                    dev_all.extend(duo_dev)
-                    print(f"  OK DuoRC ({config_name}): "
-                          f"train={len(duo_train):,}, dev={len(duo_dev):,}")
-                    duo_loaded = True
-                except Exception as e2:
-                    print(f"    - config '{config_name}' failed: {e2}")
-                    continue
-            if not duo_loaded:
-                print(f"  FAIL DuoRC: all configs failed")
-        except Exception as e:
-            print(f"  FAIL DuoRC: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] DuoRC", flush=True)
+        if not no_cache and _try_load_cache("duorc", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("DuoRC"):
+                    duo_all_train, duo_all_dev = [], []
+                    duo_loaded = False
+                    for config_name in ["SelfRC", "ParaphraseRC"]:
+                        try:
+                            print(f"    trying config: {config_name} ...", flush=True)
+                            duo_train = _convert_duorc(
+                                load_dataset("duorc", config_name, split="train"),
+                                max_train, source=f"duorc_{config_name.lower()}")
+                            duo_dev = _convert_duorc(
+                                load_dataset("duorc", config_name, split="validation"),
+                                max_dev, source=f"duorc_{config_name.lower()}")
+                            duo_all_train.extend(duo_train)
+                            duo_all_dev.extend(duo_dev)
+                            train_all.extend(duo_train)
+                            dev_all.extend(duo_dev)
+                            print(f"  OK DuoRC ({config_name}): "
+                                  f"train={len(duo_train):,}, dev={len(duo_dev):,}", flush=True)
+                            duo_loaded = True
+                        except Exception as e2:
+                            print(f"    - config '{config_name}' failed: {e2}", flush=True)
+                            continue
+                    if duo_loaded:
+                        _cache_save("duorc", duo_all_train, duo_all_dev)
+                    else:
+                        print(f"  FAIL DuoRC: all configs failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL DuoRC: {e}", flush=True)
+                traceback.print_exc()
     else:
         idx += 9
         print(f"[1-{idx}/{total_datasets}] English datasets: skipped (only_chinese=True)")
@@ -842,104 +1028,133 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
     if not skip_chinese:
         # 10. CMRC2018
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading CMRC2018 ...")
-        try:
-            cm_train = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="train"),
-                                             max_train, source="cmrc")
-            cm_dev = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="validation"),
-                                           max_dev, source="cmrc")
-            train_all.extend(cm_train)
-            dev_all.extend(cm_dev)
-            print(f"  OK CMRC2018: train={len(cm_train):,}, dev={len(cm_dev):,}")
-        except Exception as e:
-            print(f"  FAIL CMRC2018: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] CMRC2018", flush=True)
+        if not no_cache and _try_load_cache("cmrc", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("CMRC2018"):
+                    print("    downloading train split ...", flush=True)
+                    cm_train = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="train"),
+                                                     max_train, source="cmrc")
+                    print("    downloading validation split ...", flush=True)
+                    cm_dev = _convert_cmrc_or_drcd(load_dataset("cmrc2018", split="validation"),
+                                                   max_dev, source="cmrc")
+                    train_all.extend(cm_train)
+                    dev_all.extend(cm_dev)
+                    print(f"  OK CMRC2018: train={len(cm_train):,}, dev={len(cm_dev):,}", flush=True)
+                    _cache_save("cmrc", cm_train, cm_dev)
+            except Exception as e:
+                print(f"  FAIL CMRC2018: {e}", flush=True)
+                traceback.print_exc()
 
         # 11. DuReader
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading DuReader ...")
-        try:
-            loaded = False
-            for repo in ["dirtycomputer/dureader_robust-data",
-                          "PaddlePaddle/dureader_robust", "luozhouyang/dureader"]:
-                try:
-                    d_train = _convert_dureader(load_dataset(repo, split="train"),
-                                                max_train, source="dureader")
-                    d_dev = _convert_dureader(load_dataset(repo, split="validation"),
-                                              max_dev, source="dureader")
-                    train_all.extend(d_train)
-                    dev_all.extend(d_dev)
-                    print(f"  OK DuReader: train={len(d_train):,}, dev={len(d_dev):,}")
-                    loaded = True
-                    break
-                except Exception:
-                    continue
-            if not loaded:
-                print(f"  FAIL DuReader: all repos failed")
-        except Exception as e:
-            print(f"  FAIL DuReader: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] DuReader", flush=True)
+        if not no_cache and _try_load_cache("dureader", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("DuReader"):
+                    loaded = False
+                    for repo in ["dirtycomputer/dureader_robust-data",
+                                  "PaddlePaddle/dureader_robust", "luozhouyang/dureader"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            d_train = _convert_dureader(load_dataset(repo, split="train"),
+                                                        max_train, source="dureader")
+                            d_dev = _convert_dureader(load_dataset(repo, split="validation"),
+                                                      max_dev, source="dureader")
+                            train_all.extend(d_train)
+                            dev_all.extend(d_dev)
+                            print(f"  OK DuReader: train={len(d_train):,}, dev={len(d_dev):,}", flush=True)
+                            _cache_save("dureader", d_train, d_dev)
+                            loaded = True
+                            break
+                        except Exception:
+                            continue
+                    if not loaded:
+                        print(f"  FAIL DuReader: all repos failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL DuReader: {e}", flush=True)
+                traceback.print_exc()
 
         # 12. DRCD (Traditional Chinese)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading DRCD ...")
-        try:
-            drcd_loaded = False
-            for repo in ["clue/drcd", "hfl/drcd"]:
-                try:
-                    if repo == "clue/drcd":
-                        dr_train = _convert_cmrc_or_drcd(
-                            load_dataset("clue", "drcd", split="train"),
-                            max_train, source="drcd")
-                        dr_dev = _convert_cmrc_or_drcd(
-                            load_dataset("clue", "drcd", split="validation"),
-                            max_dev, source="drcd")
-                    else:
-                        dr_train = _convert_cmrc_or_drcd(
-                            load_dataset("hfl/drcd", split="train"),
-                            max_train, source="drcd")
-                        dr_dev = _convert_cmrc_or_drcd(
-                            load_dataset("hfl/drcd", split="validation"),
-                            max_dev, source="drcd")
-                    train_all.extend(dr_train)
-                    dev_all.extend(dr_dev)
-                    print(f"  OK DRCD: train={len(dr_train):,}, dev={len(dr_dev):,}")
-                    drcd_loaded = True
-                    break
-                except Exception:
-                    continue
-            if not drcd_loaded:
-                print(f"  FAIL DRCD: all repos failed")
-        except Exception as e:
-            print(f"  FAIL DRCD: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] DRCD", flush=True)
+        if not no_cache and _try_load_cache("drcd", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("DRCD"):
+                    drcd_loaded = False
+                    for repo in ["clue/drcd", "hfl/drcd"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            if repo == "clue/drcd":
+                                dr_train = _convert_cmrc_or_drcd(
+                                    load_dataset("clue", "drcd", split="train"),
+                                    max_train, source="drcd")
+                                dr_dev = _convert_cmrc_or_drcd(
+                                    load_dataset("clue", "drcd", split="validation"),
+                                    max_dev, source="drcd")
+                            else:
+                                dr_train = _convert_cmrc_or_drcd(
+                                    load_dataset("hfl/drcd", split="train"),
+                                    max_train, source="drcd")
+                                dr_dev = _convert_cmrc_or_drcd(
+                                    load_dataset("hfl/drcd", split="validation"),
+                                    max_dev, source="drcd")
+                            train_all.extend(dr_train)
+                            dev_all.extend(dr_dev)
+                            print(f"  OK DRCD: train={len(dr_train):,}, dev={len(dr_dev):,}", flush=True)
+                            _cache_save("drcd", dr_train, dr_dev)
+                            drcd_loaded = True
+                            break
+                        except Exception:
+                            continue
+                    if not drcd_loaded:
+                        print(f"  FAIL DRCD: all repos failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL DRCD: {e}", flush=True)
+                traceback.print_exc()
 
         # 13. WebQA (Chinese web)
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading WebQA ...")
-        try:
-            webqa_loaded = False
-            for repo in ["suolyer/webqa", "THUDM/webqa"]:
-                try:
-                    wq_train = _convert_webqa(load_dataset(repo, split="train"),
-                                              max_train, source="webqa")
-                    try:
-                        wq_dev = _convert_webqa(load_dataset(repo, split="validation"),
-                                                max_dev, source="webqa")
-                    except Exception:
-                        wq_dev = []
-                    train_all.extend(wq_train)
-                    dev_all.extend(wq_dev)
-                    print(f"  OK WebQA: train={len(wq_train):,}, dev={len(wq_dev):,}")
-                    webqa_loaded = True
-                    break
-                except Exception:
-                    continue
-            if not webqa_loaded:
-                print(f"  FAIL WebQA: all repos failed or not available")
-        except Exception as e:
-            print(f"  FAIL WebQA: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] WebQA", flush=True)
+        if not no_cache and _try_load_cache("webqa", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("WebQA"):
+                    webqa_loaded = False
+                    for repo in ["suolyer/webqa", "THUDM/webqa"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            wq_train = _convert_webqa(load_dataset(repo, split="train"),
+                                                      max_train, source="webqa")
+                            try:
+                                wq_dev = _convert_webqa(load_dataset(repo, split="validation"),
+                                                        max_dev, source="webqa")
+                            except Exception:
+                                wq_dev = []
+                            train_all.extend(wq_train)
+                            dev_all.extend(wq_dev)
+                            print(f"  OK WebQA: train={len(wq_train):,}, dev={len(wq_dev):,}", flush=True)
+                            _cache_save("webqa", wq_train, wq_dev)
+                            webqa_loaded = True
+                            break
+                        except Exception:
+                            continue
+                    if not webqa_loaded:
+                        print(f"  FAIL WebQA: all repos failed or not available", flush=True)
+            except Exception as e:
+                print(f"  FAIL WebQA: {e}", flush=True)
+                traceback.print_exc()
     else:
         idx += 4
         print(f"[10-{idx}/{total_datasets}] Chinese datasets: skipped (only_english=True)")
@@ -955,69 +1170,91 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
 
     # 15. XQuAD (English + Chinese)
     idx += 1
-    print(f"[{idx}/{total_datasets}] Loading XQuAD ...")
-    try:
-        xquad_loaded = False
-        for repo in ["google/xquad", "xquad"]:
-            try:
-                if not skip_english:
-                    xq_en = _convert_squad(
-                        load_dataset(repo, "xquad.en", split="validation"),
-                        max_dev, source="xquad_en")
-                    dev_all.extend(xq_en)
-                    print(f"  OK XQuAD-en: {len(xq_en):,}")
+    print(f"[{idx}/{total_datasets}] XQuAD", flush=True)
+    if not no_cache and _try_load_cache("xquad", train_all, dev_all):
+        pass
+    else:
+        print("  Loading ...", flush=True)
+        try:
+            with _Timer("XQuAD"):
+                xq_all_train, xq_all_dev = [], []
+                xquad_loaded = False
+                for repo in ["google/xquad", "xquad"]:
+                    try:
+                        print(f"    trying repo: {repo} ...", flush=True)
+                        if not skip_english:
+                            xq_en = _convert_squad(
+                                load_dataset(repo, "xquad.en", split="validation"),
+                                max_dev, source="xquad_en")
+                            dev_all.extend(xq_en)
+                            xq_all_dev.extend(xq_en)
+                            print(f"  OK XQuAD-en: {len(xq_en):,}", flush=True)
 
-                if not skip_chinese:
-                    xq_zh = _convert_squad(
-                        load_dataset(repo, "xquad.zh", split="validation"),
-                        max_dev, source="xquad_zh")
-                    dev_all.extend(xq_zh)
-                    print(f"  OK XQuAD-zh: {len(xq_zh):,}")
+                        if not skip_chinese:
+                            xq_zh = _convert_squad(
+                                load_dataset(repo, "xquad.zh", split="validation"),
+                                max_dev, source="xquad_zh")
+                            dev_all.extend(xq_zh)
+                            xq_all_dev.extend(xq_zh)
+                            print(f"  OK XQuAD-zh: {len(xq_zh):,}", flush=True)
 
-                xquad_loaded = True
-                break
-            except Exception as e2:
-                print(f"    - repo '{repo}' failed: {e2}")
-                continue
-        if not xquad_loaded:
-            print(f"  FAIL XQuAD: all repos failed")
-    except Exception as e:
-        print(f"  FAIL XQuAD: {e}")
-        traceback.print_exc()
+                        xquad_loaded = True
+                        break
+                    except Exception as e2:
+                        print(f"    - repo '{repo}' failed: {e2}", flush=True)
+                        continue
+                if xquad_loaded:
+                    _cache_save("xquad", xq_all_train, xq_all_dev)
+                else:
+                    print(f"  FAIL XQuAD: all repos failed", flush=True)
+        except Exception as e:
+            print(f"  FAIL XQuAD: {e}", flush=True)
+            traceback.print_exc()
 
     # 16. CoQA (conversational QA)
     idx += 1
     if not skip_english:
-        print(f"[{idx}/{total_datasets}] Loading CoQA ...")
-        try:
-            coqa_loaded = False
-            for repo in ["stanfordnlp/coqa", "coqa"]:
-                try:
-                    coqa_train = _convert_coqa(
-                        load_dataset(repo, split="train"),
-                        max_train, source="coqa")
-                    train_all.extend(coqa_train)
-                    print(f"  OK CoQA: train={len(coqa_train):,}")
-                    try:
-                        coqa_dev = _convert_coqa(
-                            load_dataset(repo, split="validation"),
-                            max_dev, source="coqa")
-                        dev_all.extend(coqa_dev)
-                        print(f"  OK CoQA dev: {len(coqa_dev):,}")
-                    except Exception:
-                        pass
-                    coqa_loaded = True
-                    break
-                except Exception as e2:
-                    print(f"    - repo '{repo}' failed: {e2}")
-                    continue
-            if not coqa_loaded:
-                print(f"  FAIL CoQA: all repos failed (may require manual download)")
-        except Exception as e:
-            print(f"  FAIL CoQA: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] CoQA", flush=True)
+        if not no_cache and _try_load_cache("coqa", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("CoQA"):
+                    coqa_loaded = False
+                    coqa_all_train, coqa_all_dev = [], []
+                    for repo in ["stanfordnlp/coqa", "coqa"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            coqa_train = _convert_coqa(
+                                load_dataset(repo, split="train"),
+                                max_train, source="coqa")
+                            coqa_all_train.extend(coqa_train)
+                            train_all.extend(coqa_train)
+                            print(f"  OK CoQA: train={len(coqa_train):,}", flush=True)
+                            try:
+                                coqa_dev = _convert_coqa(
+                                    load_dataset(repo, split="validation"),
+                                    max_dev, source="coqa")
+                                coqa_all_dev.extend(coqa_dev)
+                                dev_all.extend(coqa_dev)
+                                print(f"  OK CoQA dev: {len(coqa_dev):,}", flush=True)
+                            except Exception:
+                                pass
+                            coqa_loaded = True
+                            break
+                        except Exception as e2:
+                            print(f"    - repo '{repo}' failed: {e2}", flush=True)
+                            continue
+                    if coqa_loaded:
+                        _cache_save("coqa", coqa_all_train, coqa_all_dev)
+                    else:
+                        print(f"  FAIL CoQA: all repos failed (may require manual download)", flush=True)
+            except Exception as e:
+                print(f"  FAIL CoQA: {e}", flush=True)
+                traceback.print_exc()
     else:
-        print(f"[{idx}/{total_datasets}] CoQA: skipped (only_chinese=True)")
+        print(f"[{idx}/{total_datasets}] CoQA: skipped (only_chinese=True)", flush=True)
 
     # ========== Data Cleaning ==========
 
@@ -1082,9 +1319,12 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
         pct = 100 * count / len(dev_all)
         print(f"  {src:25s}: {count:8,} ({pct:5.1f}%)")
 
-    print(f"\n{'='*70}")
-    print("DONE - Large-scale QA data preparation complete!")
-    print(f"{'='*70}")
+    total_elapsed = time.time() - global_t0
+    minutes = int(total_elapsed // 60)
+    seconds = int(total_elapsed % 60)
+    print(f"\n{'='*70}", flush=True)
+    print(f"DONE - Large-scale QA data preparation complete! (total: {minutes}m {seconds}s)", flush=True)
+    print(f"{'='*70}", flush=True)
 
 
 def main():
@@ -1097,8 +1337,16 @@ def main():
                         help="Download only Chinese datasets")
     parser.add_argument("--only-english", action="store_true",
                         help="Download only English datasets")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Force re-download all datasets (ignore cache)")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Delete all cached datasets and exit")
 
     args = parser.parse_args()
+
+    if args.clear_cache:
+        clear_cache()
+        return
 
     if args.only_chinese and args.only_english:
         print("ERROR: Cannot specify both --only-chinese and --only-english")
@@ -1108,6 +1356,7 @@ def main():
         test_mode=args.test,
         only_chinese=args.only_chinese,
         only_english=args.only_english,
+        no_cache=args.no_cache,
     )
 
 
