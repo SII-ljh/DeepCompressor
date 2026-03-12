@@ -161,6 +161,11 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
     """Convert Natural Questions dataset.
 
     Only keeps samples with short answers (ignores long-answer-only and no-answer).
+
+    HuggingFace NQ format:
+      annotations.short_answers: list of dicts, each with
+        start_token: list[int], end_token: list[int]
+      document.tokens: {"token": list[str], "is_html": list[bool]}
     """
     samples = []
     for row in dataset:
@@ -171,16 +176,33 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
         if not short_answers or not short_answers[0]:
             continue
 
-        answer_start = short_answers[0].get("start_token", -1)
-        answer_end = short_answers[0].get("end_token", -1)
+        # start_token / end_token may be lists (one per answer span)
+        raw_start = short_answers[0].get("start_token", -1)
+        raw_end = short_answers[0].get("end_token", -1)
+        answer_start = raw_start[0] if isinstance(raw_start, list) else raw_start
+        answer_end = raw_end[0] if isinstance(raw_end, list) else raw_end
         if answer_start < 0 or answer_end < 0:
             continue
 
+        # document.tokens is {"token": [...], "is_html": [...]} in HF format
+        doc_tokens_raw = row.get("document", {}).get("tokens", {})
+        if isinstance(doc_tokens_raw, dict):
+            token_list = doc_tokens_raw.get("token", [])
+            is_html = doc_tokens_raw.get("is_html", [])
+        elif isinstance(doc_tokens_raw, list) and doc_tokens_raw and isinstance(doc_tokens_raw[0], dict):
+            # Legacy format: list of {"token": str, "is_html": bool}
+            token_list = [t.get("token", "") for t in doc_tokens_raw]
+            is_html = [t.get("is_html", False) for t in doc_tokens_raw]
+        else:
+            token_list = []
+            is_html = []
+
         context = row.get("document", {}).get("text", "")
-        if not context:
-            tokens = row.get("document", {}).get("tokens", [])
-            if tokens:
-                context = " ".join(t.get("token", "") for t in tokens)
+        if not context and token_list:
+            # Build context from non-HTML tokens
+            context = " ".join(
+                t for t, h in zip(token_list, is_html) if not h
+            ) if is_html else " ".join(token_list)
 
         if not context or len(context) < 100:
             continue
@@ -188,18 +210,23 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
         if len(context) > max_context_chars:
             context = context[:max_context_chars]
 
-        tokens = row.get("document", {}).get("tokens", [])
-        if tokens:
-            answer = " ".join(t.get("token", "") for t in tokens[answer_start:answer_end])
+        # Extract answer from token span
+        if token_list and answer_end <= len(token_list):
+            answer = " ".join(token_list[answer_start:answer_end])
         else:
-            answer = context[answer_start:answer_end]
+            answer = context[answer_start:answer_end] if answer_end <= len(context) else ""
 
         if not answer.strip():
             continue
 
+        # question may be a dict {"text": ...} or a plain string
+        question = row.get("question", "")
+        if isinstance(question, dict):
+            question = question.get("text", "")
+
         samples.append({
             "context": context,
-            "question": row["question"]["text"],
+            "question": question,
             "answer": answer.strip(),
             "source": source,
         })
@@ -687,10 +714,10 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
         print(f"[{idx}/{total_datasets}] Loading QuAC ...")
         try:
             quac_train = _convert_quac(
-                load_dataset("quac", split="train"),
+                load_dataset("quac", split="train", trust_remote_code=True),
                 max_train, source="quac")
             quac_dev = _convert_quac(
-                load_dataset("quac", split="validation"),
+                load_dataset("quac", split="validation", trust_remote_code=True),
                 max_dev, source="quac")
             train_all.extend(quac_train)
             dev_all.extend(quac_dev)
@@ -913,13 +940,13 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
                 if not skip_english:
                     # English subset
                     mlqa_en_test = _convert_squad(
-                        load_dataset(repo, "mlqa.en.en", split="test"),
+                        load_dataset(repo, "mlqa.en.en", split="test", trust_remote_code=True),
                         max_dev, source="mlqa_en")
                     dev_all.extend(mlqa_en_test)
                     print(f"  OK MLQA-en: test={len(mlqa_en_test):,}")
                     try:
                         mlqa_en_val = _convert_squad(
-                            load_dataset(repo, "mlqa.en.en", split="validation"),
+                            load_dataset(repo, "mlqa.en.en", split="validation", trust_remote_code=True),
                             max_dev, source="mlqa_en")
                         dev_all.extend(mlqa_en_val)
                         print(f"  OK MLQA-en val: {len(mlqa_en_val):,}")
@@ -929,13 +956,13 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
                 if not skip_chinese:
                     # Chinese subset
                     mlqa_zh_test = _convert_squad(
-                        load_dataset(repo, "mlqa.zh.zh", split="test"),
+                        load_dataset(repo, "mlqa.zh.zh", split="test", trust_remote_code=True),
                         max_dev, source="mlqa_zh")
                     dev_all.extend(mlqa_zh_test)
                     print(f"  OK MLQA-zh: test={len(mlqa_zh_test):,}")
                     try:
                         mlqa_zh_val = _convert_squad(
-                            load_dataset(repo, "mlqa.zh.zh", split="validation"),
+                            load_dataset(repo, "mlqa.zh.zh", split="validation", trust_remote_code=True),
                             max_dev, source="mlqa_zh")
                         dev_all.extend(mlqa_zh_val)
                         print(f"  OK MLQA-zh val: {len(mlqa_zh_val):,}")
