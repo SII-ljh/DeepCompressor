@@ -151,6 +151,8 @@ def evaluate(model, eval_loader: DataLoader, tokenizer, accelerator: Accelerator
              show_samples: int = 5) -> Dict[str, float]:
     """Two-pass evaluation: right-pad loss + left-pad generation."""
     model.eval()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     unwrapped = accelerator.unwrap_model(model)
 
     pad_id = tokenizer.pad_token_id
@@ -209,6 +211,9 @@ def evaluate(model, eval_loader: DataLoader, tokenizer, accelerator: Accelerator
         )
         total_loss += outputs.loss.detach().item()
         total_batches += 1
+        del outputs, rp_ids, rp_labels, rp_mask
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # ── Pass 2: Left-pad for generation ──
         max_plen = max(t.shape[0] for t in all_prompt_ids)
@@ -228,6 +233,7 @@ def evaluate(model, eval_loader: DataLoader, tokenizer, accelerator: Accelerator
         gen_only = gen_out[:, max_plen:]
         preds_raw = tokenizer.batch_decode(gen_only, skip_special_tokens=True)
         preds = [_strip_thinking(p) for p in preds_raw]
+        del lp_ids, lp_mask, gen_out, gen_only
 
         for i, (pred, gold) in enumerate(zip(preds, golds)):
             em = compute_exact_match(pred, gold)
@@ -441,6 +447,7 @@ def train(args):
                     use_cache=False,
                 )
                 loss = outputs.loss
+                del outputs  # free logits (batch*seq*vocab ≈ 10GB)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -543,7 +550,11 @@ def train(args):
         print("  FINAL EVALUATION (best adapter)")
         print("=" * 72)
 
-        # Reload best adapter for final eval
+        # Free training model before loading best adapter
+        del model, optimizer, scheduler
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         best_dir = os.path.join(args.output_dir, "best_adapter")
         if os.path.exists(best_dir):
             from peft import PeftModel
