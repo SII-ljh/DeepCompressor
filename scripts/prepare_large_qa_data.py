@@ -579,7 +579,7 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
 
     # Test mode limits
     max_train = 5000 if test_mode else 0
-    max_dev = 1000 if test_mode else 0
+    max_dev = 500 if test_mode else 200  # keep dev small: ~200 per dataset
 
     total_datasets = 16
     idx = 0
