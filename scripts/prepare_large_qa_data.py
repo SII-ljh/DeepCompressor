@@ -101,11 +101,45 @@ def _convert_cmrc_or_drcd(dataset, max_n: int = 0, source: str = "cmrc"):
 
 
 def _convert_dureader(dataset, max_n: int = 0, source: str = "dureader"):
-    """Convert DuReader-robust dataset."""
+    """Convert DuReader-robust dataset.
+
+    Supports two formats:
+    1. Flat format: {"context": ..., "question": ..., "answers": {"text": [...]}}
+    2. Nested SQuAD format (dirtycomputer): {"data": {"paragraphs": [{"context": ..., "qas": [...]}]}}
+    """
     samples = []
     for row in dataset:
         if max_n and len(samples) >= max_n:
             break
+
+        # Nested SQuAD format (dirtycomputer/dureader_robust-data)
+        if "data" in row and isinstance(row["data"], dict):
+            paragraphs = row["data"].get("paragraphs", [])
+            for para in paragraphs:
+                if max_n and len(samples) >= max_n:
+                    break
+                context = para.get("context", "")
+                if not context:
+                    continue
+                for qa in para.get("qas", []):
+                    if max_n and len(samples) >= max_n:
+                        break
+                    question = qa.get("question", "")
+                    answers = qa.get("answers", [])
+                    if not answers or not question:
+                        continue
+                    answer = answers[0].get("text", "") if isinstance(answers[0], dict) else str(answers[0])
+                    if not answer:
+                        continue
+                    samples.append({
+                        "context": context,
+                        "question": question,
+                        "answer": answer,
+                        "source": source,
+                    })
+            continue
+
+        # Flat format
         answers = row.get("answers", {}).get("text", [])
         if not answers:
             answer = row.get("answer", "")
@@ -162,37 +196,36 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
 
     Only keeps samples with short answers (ignores long-answer-only and no-answer).
 
-    HuggingFace NQ format:
-      annotations.short_answers: list of dicts, each with
-        start_token: list[int], end_token: list[int]
+    HuggingFace NQ format (per row):
+      annotations.short_answers: list of 5 annotator dicts, each with:
+        text: list[str]        — answer text spans (empty list = no answer)
+        start_token: list[int] — start token indices
+        end_token:   list[int] — end token indices
       document.tokens: {"token": list[str], "is_html": list[bool]}
+      question: {"text": str, "tokens": list[str]}
     """
     samples = []
     for row in dataset:
         if max_n and len(samples) >= max_n:
             break
 
-        short_answers = row.get("annotations", {}).get("short_answers", [])
-        if not short_answers or not short_answers[0]:
+        # Find the first annotator with a non-empty short answer
+        sa_list = row.get("annotations", {}).get("short_answers", [])
+        answer = ""
+        for sa in sa_list:
+            texts = sa.get("text", [])
+            if texts and len(texts) > 0 and texts[0]:
+                answer = texts[0]
+                break
+
+        if not answer:
             continue
 
-        # start_token / end_token may be lists (one per answer span)
-        raw_start = short_answers[0].get("start_token", -1)
-        raw_end = short_answers[0].get("end_token", -1)
-        answer_start = raw_start[0] if isinstance(raw_start, list) else raw_start
-        answer_end = raw_end[0] if isinstance(raw_end, list) else raw_end
-        if answer_start < 0 or answer_end < 0:
-            continue
-
-        # document.tokens is {"token": [...], "is_html": [...]} in HF format
+        # Build context from document tokens (document.text is usually empty)
         doc_tokens_raw = row.get("document", {}).get("tokens", {})
         if isinstance(doc_tokens_raw, dict):
             token_list = doc_tokens_raw.get("token", [])
             is_html = doc_tokens_raw.get("is_html", [])
-        elif isinstance(doc_tokens_raw, list) and doc_tokens_raw and isinstance(doc_tokens_raw[0], dict):
-            # Legacy format: list of {"token": str, "is_html": bool}
-            token_list = [t.get("token", "") for t in doc_tokens_raw]
-            is_html = [t.get("is_html", False) for t in doc_tokens_raw]
         else:
             token_list = []
             is_html = []
@@ -200,9 +233,10 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
         context = row.get("document", {}).get("text", "")
         if not context and token_list:
             # Build context from non-HTML tokens
-            context = " ".join(
-                t for t, h in zip(token_list, is_html) if not h
-            ) if is_html else " ".join(token_list)
+            if is_html:
+                context = " ".join(t for t, h in zip(token_list, is_html) if not h)
+            else:
+                context = " ".join(token_list)
 
         if not context or len(context) < 100:
             continue
@@ -210,16 +244,7 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
         if len(context) > max_context_chars:
             context = context[:max_context_chars]
 
-        # Extract answer from token span
-        if token_list and answer_end <= len(token_list):
-            answer = " ".join(token_list[answer_start:answer_end])
-        else:
-            answer = context[answer_start:answer_end] if answer_end <= len(context) else ""
-
-        if not answer.strip():
-            continue
-
-        # question may be a dict {"text": ...} or a plain string
+        # question is {"text": str} or plain string
         question = row.get("question", "")
         if isinstance(question, dict):
             question = question.get("text", "")
@@ -710,21 +735,11 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
             traceback.print_exc()
 
         # 6. QuAC (conversational QA)
+        # NOTE: allenai/quac uses legacy dataset scripts, no parquet alternative.
+        # Blocked by datasets>=4.x. Skip gracefully.
         idx += 1
-        print(f"[{idx}/{total_datasets}] Loading QuAC ...")
-        try:
-            quac_train = _convert_quac(
-                load_dataset("quac", split="train", trust_remote_code=True),
-                max_train, source="quac")
-            quac_dev = _convert_quac(
-                load_dataset("quac", split="validation", trust_remote_code=True),
-                max_dev, source="quac")
-            train_all.extend(quac_train)
-            dev_all.extend(quac_dev)
-            print(f"  OK QuAC: train={len(quac_train):,}, dev={len(quac_dev):,}")
-        except Exception as e:
-            print(f"  FAIL QuAC: {e}")
-            traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] QuAC: SKIPPED (no parquet-format repo available, "
+              "allenai/quac uses legacy dataset scripts blocked by datasets>=4.x)")
 
         # 7. DROP (discrete reasoning)
         idx += 1
@@ -845,7 +860,8 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
         print(f"[{idx}/{total_datasets}] Loading DuReader ...")
         try:
             loaded = False
-            for repo in ["PaddlePaddle/dureader_robust", "luozhouyang/dureader"]:
+            for repo in ["dirtycomputer/dureader_robust-data",
+                          "PaddlePaddle/dureader_robust", "luozhouyang/dureader"]:
                 try:
                     d_train = _convert_dureader(load_dataset(repo, split="train"),
                                                 max_train, source="dureader")
@@ -931,54 +947,11 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
     # ========== Multilingual Datasets ==========
 
     # 14. MLQA (English + Chinese)
+    # NOTE: facebook/mlqa uses legacy dataset scripts, blocked by datasets>=4.x.
+    # Skip gracefully.
     idx += 1
-    print(f"[{idx}/{total_datasets}] Loading MLQA ...")
-    try:
-        mlqa_loaded = False
-        for repo in ["facebook/mlqa", "mlqa"]:
-            try:
-                if not skip_english:
-                    # English subset
-                    mlqa_en_test = _convert_squad(
-                        load_dataset(repo, "mlqa.en.en", split="test", trust_remote_code=True),
-                        max_dev, source="mlqa_en")
-                    dev_all.extend(mlqa_en_test)
-                    print(f"  OK MLQA-en: test={len(mlqa_en_test):,}")
-                    try:
-                        mlqa_en_val = _convert_squad(
-                            load_dataset(repo, "mlqa.en.en", split="validation", trust_remote_code=True),
-                            max_dev, source="mlqa_en")
-                        dev_all.extend(mlqa_en_val)
-                        print(f"  OK MLQA-en val: {len(mlqa_en_val):,}")
-                    except Exception:
-                        pass
-
-                if not skip_chinese:
-                    # Chinese subset
-                    mlqa_zh_test = _convert_squad(
-                        load_dataset(repo, "mlqa.zh.zh", split="test", trust_remote_code=True),
-                        max_dev, source="mlqa_zh")
-                    dev_all.extend(mlqa_zh_test)
-                    print(f"  OK MLQA-zh: test={len(mlqa_zh_test):,}")
-                    try:
-                        mlqa_zh_val = _convert_squad(
-                            load_dataset(repo, "mlqa.zh.zh", split="validation", trust_remote_code=True),
-                            max_dev, source="mlqa_zh")
-                        dev_all.extend(mlqa_zh_val)
-                        print(f"  OK MLQA-zh val: {len(mlqa_zh_val):,}")
-                    except Exception:
-                        pass
-
-                mlqa_loaded = True
-                break
-            except Exception as e2:
-                print(f"    - repo '{repo}' failed: {e2}")
-                continue
-        if not mlqa_loaded:
-            print(f"  FAIL MLQA: all repos failed")
-    except Exception as e:
-        print(f"  FAIL MLQA: {e}")
-        traceback.print_exc()
+    print(f"[{idx}/{total_datasets}] MLQA: SKIPPED (no parquet-format repo available, "
+          "facebook/mlqa uses legacy dataset scripts blocked by datasets>=4.x)")
 
     # 15. XQuAD (English + Chinese)
     idx += 1
