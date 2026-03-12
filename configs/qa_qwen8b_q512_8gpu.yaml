@@ -1,0 +1,59 @@
+qwen:
+  model_name_or_path: models/Qwen3-8B
+  max_doc_tokens: 4096
+  max_question_tokens: 256
+  max_answer_tokens: 512
+perceiver:
+  perceiver_dim: 4096      # auto-resolved: Qwen3-8B hidden_size=4096
+  num_heads: 32
+  head_dim: 128
+  stage_a_cross_layers: 2
+  stage_a_self_layers: 2
+  stage_b_layers: 2
+  stage_c_cross_layers: 2
+  stage_c_self_layers: 4
+  ff_mult: 4
+  dropout: 0.1
+  num_queries: 512
+projection:
+  down_hidden: 768
+  up_hidden: 768
+  dropout: 0.1
+loss:
+  kl_temperature: 2.0
+  hidden_distill_ramp_steps: 2000
+  hidden_distill_layers:
+  - 9
+  - 18
+  - 27
+  - 35
+  qa_ce_weight: 1.0
+  kl_weight: 0.0
+  hidden_mse_weight: 0.0
+training:
+  learning_rate: 0.00005
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 10000
+  warmup_steps: 500
+  early_stopping_patience: 5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+  seed: 42
+  log_every: 50
+  eval_every: 1890
+  save_every: 1890
+  gradient_checkpointing: true
+  mixed_precision: bf16
+  output_dir: outputs/qa_qwen8b_q512_8gpu
+ablation:
+  down_proj_mode: identity
+  up_proj_mode: identity
+  query_condition_on_question: true
+  enable_stage_a: true
+  enable_stage_b: true
+  enable_stage_c: true
+  enable_kl_distillation: false
+  enable_hidden_mse_distillation: false
+  override_num_queries: 0
