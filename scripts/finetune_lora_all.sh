@@ -29,22 +29,22 @@ MODEL_PATHS["4B"]="models/Qwen3-4B"
 MODEL_PATHS["8B"]="models/Qwen3-8B"
 
 declare -A BATCH_SIZES
-BATCH_SIZES["0.6B"]=24
-BATCH_SIZES["1.7B"]=12
-BATCH_SIZES["4B"]=6
-BATCH_SIZES["8B"]=3
+BATCH_SIZES["0.6B"]=16
+BATCH_SIZES["1.7B"]=8
+BATCH_SIZES["4B"]=4
+BATCH_SIZES["8B"]=2
 
 declare -A EVAL_BATCH_SIZES
-EVAL_BATCH_SIZES["0.6B"]=12
-EVAL_BATCH_SIZES["1.7B"]=6
-EVAL_BATCH_SIZES["4B"]=3
-EVAL_BATCH_SIZES["8B"]=2
+EVAL_BATCH_SIZES["0.6B"]=4
+EVAL_BATCH_SIZES["1.7B"]=4
+EVAL_BATCH_SIZES["4B"]=2
+EVAL_BATCH_SIZES["8B"]=1
 
 declare -A GRAD_ACCUM
-GRAD_ACCUM["0.6B"]=1
-GRAD_ACCUM["1.7B"]=2
-GRAD_ACCUM["4B"]=4
-GRAD_ACCUM["8B"]=8
+GRAD_ACCUM["0.6B"]=2
+GRAD_ACCUM["1.7B"]=4
+GRAD_ACCUM["4B"]=8
+GRAD_ACCUM["8B"]=16
 
 if [ $# -gt 0 ]; then
     SIZES=("$@")
@@ -105,6 +105,7 @@ for SIZE in "${SIZES[@]}"; do
     fi
 
     export WANDB_MODE=offline
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     accelerate launch \
         --multi_gpu \
