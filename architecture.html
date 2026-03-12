@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Compressor - Architecture</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d2e;
+    --surface2: #232740;
+    --border: #2e3348;
+    --text: #e1e4ed;
+    --text2: #8b90a5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --cyan: #22d3ee;
+    --pink: #f472b6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* Header */
+  .hero {
+    text-align: center;
+    padding: 80px 20px 60px;
+    background: linear-gradient(180deg, #151830 0%, var(--bg) 100%);
+    position: relative;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 600px 300px at 50% 20%, rgba(108,140,255,0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #6c8cff, #a78bfa, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 16px;
+  }
+  .hero .subtitle {
+    font-size: 1.15rem;
+    color: var(--text2);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .badges {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 28px;
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* Layout */
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  section { margin-bottom: 72px; }
+  h2 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-bottom: 28px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--accent);
+  }
+  p { color: var(--text2); margin-bottom: 14px; }
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.88em;
+    background: var(--surface2);
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: var(--cyan);
+  }
+
+  /* Pipeline Diagram */
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    overflow-x: auto;
+    padding: 20px 0;
+  }
+  .pipe-step {
+    flex: 1;
+    min-width: 180px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 16px;
+    text-align: center;
+    position: relative;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .pipe-step:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 24px rgba(108,140,255,0.1);
+  }
+  .pipe-step .step-num {
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 10px;
+  }
+  .pipe-step .icon { font-size: 2rem; margin-bottom: 8px; }
+  .pipe-step h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .pipe-step .desc {
+    font-size: 0.8rem;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+  .pipe-arrow {
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    color: var(--text2);
+    font-size: 1.4rem;
+    flex-shrink: 0;
+  }
+
+  /* Module Cards */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 20px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .card:hover {
+    border-color: var(--accent2);
+    transform: translateY(-2px);
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .card-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+  }
+  .card-header h4 { font-size: 1.05rem; font-weight: 600; }
+  .card-tag {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 500;
+    margin-left: auto;
+  }
+  .tag-frozen { background: rgba(34,211,238,0.12); color: var(--cyan); }
+  .tag-trainable { background: rgba(52,211,153,0.12); color: var(--green); }
+  .tag-optional { background: rgba(251,146,60,0.12); color: var(--orange); }
+  .card .detail {
+    font-size: 0.85rem;
+    color: var(--text2);
+    line-height: 1.65;
+  }
+  .card .detail strong { color: var(--text); font-weight: 500; }
+  .dim-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface2);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-family: 'SF Mono', monospace;
+    font-size: 0.82rem;
+    margin: 8px 0;
+    color: var(--accent);
+  }
+  .dim-flow .arr { color: var(--text2); }
+
+  /* Perceiver Detail */
+  .perceiver-stages {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 16px;
+  }
+  .stage-box {
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 18px;
+    border-left: 3px solid;
+    position: relative;
+  }
+  .stage-box h5 {
+    font-size: 0.92rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .stage-box .layers {
+    font-size: 0.8rem;
+    color: var(--text2);
+    line-height: 1.6;
+  }
+  .stage-a { border-color: var(--accent); }
+  .stage-a h5 { color: var(--accent); }
+  .stage-b { border-color: var(--accent2); }
+  .stage-b h5 { color: var(--accent2); }
+  .stage-c { border-color: var(--pink); }
+  .stage-c h5 { color: var(--pink); }
+
+  /* Data Flow SVG */
+  .flow-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 24px;
+    overflow-x: auto;
+    margin-bottom: 32px;
+  }
+  .flow-svg { display: block; margin: 0 auto; }
+
+  /* Training */
+  .training-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .train-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+  }
+  .train-card h4 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .train-card ul {
+    list-style: none;
+    padding: 0;
+  }
+  .train-card li {
+    font-size: 0.88rem;
+    color: var(--text2);
+    padding: 5px 0;
+    padding-left: 18px;
+    position: relative;
+  }
+  .train-card li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 12px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* Loss */
+  .loss-eq {
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 20px 24px;
+    font-family: 'SF Mono', monospace;
+    font-size: 0.95rem;
+    text-align: center;
+    margin: 16px 0;
+    line-height: 2;
+    overflow-x: auto;
+  }
+  .loss-eq .var { color: var(--accent); }
+  .loss-eq .op { color: var(--text2); }
+  .loss-eq .w { color: var(--orange); }
+
+  /* Key Constraint */
+  .constraint-box {
+    background: linear-gradient(135deg, rgba(108,140,255,0.06), rgba(167,139,250,0.06));
+    border: 1px solid rgba(108,140,255,0.2);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+  .constraint-box h4 {
+    color: var(--accent);
+    font-size: 1rem;
+    margin-bottom: 10px;
+  }
+  .constraint-box p {
+    font-size: 0.9rem;
+    margin-bottom: 0;
+  }
+
+  /* Config table */
+  .config-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin-top: 16px;
+  }
+  .config-table th {
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--surface2);
+    color: var(--text);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+  }
+  .config-table td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+  }
+  .config-table tr:hover td { background: rgba(108,140,255,0.04); }
+  .config-table code { font-size: 0.82em; }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--text2);
+    font-size: 0.82rem;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 2rem; }
+    .pipeline { flex-direction: column; align-items: center; }
+    .pipe-arrow { transform: rotate(90deg); padding: 6px 0; }
+    .perceiver-stages { grid-template-columns: 1fr; }
+    .training-grid { grid-template-columns: 1fr; }
+    .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<header class="hero">
+  <h1>Deep Compressor</h1>
+  <p class="subtitle">
+    将超长金融文本 (8K–64K tokens) 压缩为固定长度的隐向量序列，作为冻结 Qwen 解码器的前缀，
+    回答细节级金融问答。通过 Teacher Distillation 保证压缩前缀携带等效于完整文档的信息。
+  </p>
+  <div class="badges">
+    <span class="badge"><span class="dot" style="background:var(--cyan)"></span>Qwen3-0.6B ~ 8B</span>
+    <span class="badge"><span class="dot" style="background:var(--green)"></span>Perceiver Compression</span>
+    <span class="badge"><span class="dot" style="background:var(--accent2)"></span>Teacher Distillation</span>
+    <span class="badge"><span class="dot" style="background:var(--orange)"></span>Sequence-Length-Only</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- Key Constraint -->
+<section>
+  <div class="constraint-box">
+    <h4>Core Design: Sequence-Length-Only Compression</h4>
+    <p>
+      对于已知 Qwen3 模型，<code>perceiver_dim</code> 被强制等于 <code>qwen.hidden_size</code>
+      (如 Qwen3-0.6B 为 1024)。DownProj / UpProj 默认为 <strong style="color:var(--text)">Identity</strong>（无参数）——
+      压缩仅通过序列长度缩减实现 (<code>doc_len → num_queries</code>)，而非维度缩减。
+      MLP/Linear 模式仅用于消融实验。
+    </p>
+  </div>
+</section>
+
+<!-- Pipeline Overview -->
+<section>
+  <h2>Data Flow Pipeline</h2>
+  <div class="pipeline">
+    <div class="pipe-step">
+      <span class="step-num">1</span>
+      <div class="icon">&#x1F4C4;</div>
+      <h4>Document Encoding</h4>
+      <p class="desc">
+        Frozen Qwen Encoder<br>
+        <code>qwen.model(...)</code><br>
+        → DownProj (identity)
+      </p>
+    </div>
+    <div class="pipe-arrow">&#x2192;</div>
+    <div class="pipe-step">
+      <span class="step-num">2</span>
+      <div class="icon">&#x2753;</div>
+      <h4>Query Encoding</h4>
+      <p class="desc">
+        Frozen Qwen → mean pool<br>
+        → QueryInit<br>
+        (learnable base + question bias)
+      </p>
+    </div>
+    <div class="pipe-arrow">&#x2192;</div>
+    <div class="pipe-step">
+      <span class="step-num">3</span>
+      <div class="icon">&#x1F5DC;</div>
+      <h4>Compression</h4>
+      <p class="desc">
+        GuidedPerceiver<br>
+        Stage A → B → C<br>
+        <code>doc_len → Q</code>
+      </p>
+    </div>
+    <div class="pipe-arrow">&#x2192;</div>
+    <div class="pipe-step">
+      <span class="step-num">4</span>
+      <div class="icon">&#x1F4AC;</div>
+      <h4>Generation</h4>
+      <p class="desc">
+        UpMLP (identity)<br>
+        → prefix + Q tokens<br>
+        → Frozen Qwen Decoder
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Architecture Diagram (SVG) -->
+<section>
+  <h2>Architecture Diagram</h2>
+  <div class="flow-container">
+    <svg class="flow-svg" viewBox="0 0 1050 520" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, sans-serif">
+      <defs>
+        <marker id="arrowBlue" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#6c8cff"/></marker>
+        <marker id="arrowGreen" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/></marker>
+        <marker id="arrowPink" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#f472b6"/></marker>
+        <marker id="arrowOrange" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#fb923c"/></marker>
+        <linearGradient id="gradFrozen" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#1e3a5f"/><stop offset="100%" stop-color="#1a2744"/>
+        </linearGradient>
+        <linearGradient id="gradTrainable" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#1a3d2e"/><stop offset="100%" stop-color="#1a2e26"/>
+        </linearGradient>
+        <linearGradient id="gradPerceiver" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2d1f4e"/><stop offset="100%" stop-color="#231940"/>
+        </linearGradient>
+      </defs>
+
+      <!-- Document Input -->
+      <rect x="20" y="60" width="140" height="60" rx="10" fill="var(--surface2)" stroke="#4a5070" stroke-width="1"/>
+      <text x="90" y="85" text-anchor="middle" fill="#e1e4ed" font-size="13" font-weight="600">Document</text>
+      <text x="90" y="104" text-anchor="middle" fill="#8b90a5" font-size="11">(B, doc_len)</text>
+
+      <!-- Question Input -->
+      <rect x="20" y="380" width="140" height="60" rx="10" fill="var(--surface2)" stroke="#4a5070" stroke-width="1"/>
+      <text x="90" y="405" text-anchor="middle" fill="#e1e4ed" font-size="13" font-weight="600">Question</text>
+      <text x="90" y="424" text-anchor="middle" fill="#8b90a5" font-size="11">(B, q_len)</text>
+
+      <!-- Frozen Qwen Encoder (Doc) -->
+      <rect x="210" y="45" width="150" height="90" rx="10" fill="url(#gradFrozen)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="5,3"/>
+      <text x="285" y="75" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">FROZEN</text>
+      <text x="285" y="95" text-anchor="middle" fill="#e1e4ed" font-size="13" font-weight="600">Qwen Encoder</text>
+      <text x="285" y="115" text-anchor="middle" fill="#8b90a5" font-size="10">qwen.model(...)</text>
+
+      <!-- Arrow Doc -> Qwen Enc -->
+      <line x1="160" y1="90" x2="208" y2="90" stroke="#6c8cff" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <!-- DownProj -->
+      <rect x="410" y="60" width="120" height="60" rx="10" fill="url(#gradTrainable)" stroke="#34d399" stroke-width="1.2"/>
+      <text x="470" y="85" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">DownProj</text>
+      <text x="470" y="102" text-anchor="middle" fill="#8b90a5" font-size="10">Identity (default)</text>
+
+      <!-- Arrow Qwen Enc -> DownProj -->
+      <line x1="360" y1="90" x2="408" y2="90" stroke="#6c8cff" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <!-- byte_array label -->
+      <text x="570" y="70" text-anchor="start" fill="#6c8cff" font-size="10" font-style="italic">byte_array</text>
+      <text x="570" y="85" text-anchor="start" fill="#8b90a5" font-size="9.5">(B, doc_len, D)</text>
+
+      <!-- Arrow DownProj -> Perceiver -->
+      <line x1="530" y1="90" x2="570" y2="90" stroke="#6c8cff" stroke-width="1.5"/>
+      <line x1="570" y1="90" x2="570" y2="220" stroke="#6c8cff" stroke-width="1.5"/>
+      <line x1="570" y1="220" x2="558" y2="220" stroke="#6c8cff" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <!-- Frozen Qwen Encoder (Question) -->
+      <rect x="210" y="365" width="150" height="90" rx="10" fill="url(#gradFrozen)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="5,3"/>
+      <text x="285" y="395" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">FROZEN</text>
+      <text x="285" y="415" text-anchor="middle" fill="#e1e4ed" font-size="13" font-weight="600">Qwen Encoder</text>
+      <text x="285" y="435" text-anchor="middle" fill="#8b90a5" font-size="10">mean pool → (B, D)</text>
+
+      <!-- Arrow Q -> Qwen Enc -->
+      <line x1="160" y1="410" x2="208" y2="410" stroke="#f472b6" stroke-width="1.5" marker-end="url(#arrowPink)"/>
+
+      <!-- QueryInit -->
+      <rect x="410" y="380" width="120" height="60" rx="10" fill="url(#gradTrainable)" stroke="#34d399" stroke-width="1.2"/>
+      <text x="470" y="403" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">QueryInit</text>
+      <text x="470" y="420" text-anchor="middle" fill="#8b90a5" font-size="10">base + q_bias</text>
+
+      <!-- Arrow Qwen Enc Q -> QueryInit -->
+      <line x1="360" y1="410" x2="408" y2="410" stroke="#f472b6" stroke-width="1.5" marker-end="url(#arrowPink)"/>
+
+      <!-- queries label -->
+      <text x="540" y="390" text-anchor="start" fill="#f472b6" font-size="10" font-style="italic">queries</text>
+      <text x="540" y="405" text-anchor="start" fill="#8b90a5" font-size="9.5">(B, Q, D)</text>
+
+      <!-- Arrow QueryInit -> Perceiver -->
+      <path d="M 530 410 L 560 410 L 560 300 L 558 300" fill="none" stroke="#f472b6" stroke-width="1.5" marker-end="url(#arrowPink)"/>
+
+      <!-- GuidedPerceiver (big box) -->
+      <rect x="360" y="170" width="200" height="180" rx="14" fill="url(#gradPerceiver)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="460" y="196" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="700">GuidedPerceiver</text>
+
+      <!-- Stage A -->
+      <rect x="376" y="210" width="168" height="34" rx="6" fill="rgba(108,140,255,0.12)" stroke="#6c8cff" stroke-width="0.8"/>
+      <text x="460" y="232" text-anchor="middle" fill="#6c8cff" font-size="10.5" font-weight="600">Stage A: Cross + Self Attn</text>
+
+      <!-- Stage B -->
+      <rect x="376" y="252" width="168" height="34" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="0.8"/>
+      <text x="460" y="274" text-anchor="middle" fill="#a78bfa" font-size="10.5" font-weight="600">Stage B: Self Attention</text>
+
+      <!-- Stage C -->
+      <rect x="376" y="294" width="168" height="34" rx="6" fill="rgba(244,114,182,0.12)" stroke="#f472b6" stroke-width="0.8"/>
+      <text x="460" y="316" text-anchor="middle" fill="#f472b6" font-size="10.5" font-weight="600">Stage C: Cross + Deep Self</text>
+
+      <!-- Arrow Perceiver -> UpMLP -->
+      <line x1="560" y1="260" x2="620" y2="260" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <!-- latent_array label -->
+      <text x="575" y="250" text-anchor="start" fill="#a78bfa" font-size="10" font-style="italic">latent</text>
+
+      <!-- UpMLP -->
+      <rect x="622" y="230" width="120" height="60" rx="10" fill="url(#gradTrainable)" stroke="#34d399" stroke-width="1.2"/>
+      <text x="682" y="255" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">UpMLP</text>
+      <text x="682" y="272" text-anchor="middle" fill="#8b90a5" font-size="10">Identity (default)</text>
+
+      <!-- prefix_embeds label -->
+      <text x="755" y="245" text-anchor="start" fill="#fb923c" font-size="10" font-style="italic">prefix</text>
+      <text x="755" y="260" text-anchor="start" fill="#8b90a5" font-size="9.5">(B, Q, D)</text>
+
+      <!-- Arrow UpMLP -> Decoder -->
+      <line x1="742" y1="260" x2="810" y2="260" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+      <!-- Cat symbol -->
+      <circle cx="830" cy="260" r="16" fill="var(--surface2)" stroke="#fb923c" stroke-width="1"/>
+      <text x="830" y="264" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="700">+</text>
+      <text x="830" y="288" text-anchor="middle" fill="#8b90a5" font-size="9">concat</text>
+
+      <!-- Q+A suffix arrow to concat -->
+      <line x1="830" y1="370" x2="830" y2="278" stroke="#fb923c" stroke-width="1.2" marker-end="url(#arrowOrange)"/>
+      <rect x="778" y="374" width="105" height="40" rx="8" fill="var(--surface2)" stroke="#4a5070" stroke-width="1"/>
+      <text x="830" y="396" text-anchor="middle" fill="#e1e4ed" font-size="11" font-weight="500">Q + A tokens</text>
+
+      <!-- Arrow Concat -> Decoder -->
+      <line x1="846" y1="260" x2="885" y2="260" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+      <!-- Frozen Qwen Decoder -->
+      <rect x="888" y="210" width="145" height="100" rx="10" fill="url(#gradFrozen)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="5,3"/>
+      <text x="960" y="240" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">FROZEN</text>
+      <text x="960" y="260" text-anchor="middle" fill="#e1e4ed" font-size="13" font-weight="600">Qwen Decoder</text>
+      <text x="960" y="280" text-anchor="middle" fill="#8b90a5" font-size="10">qwen(inputs_embeds=...)</text>
+      <text x="960" y="298" text-anchor="middle" fill="#fb923c" font-size="10">→ Answer</text>
+
+      <!-- Legend -->
+      <rect x="20" y="475" width="260" height="35" rx="6" fill="var(--surface2)"/>
+      <line x1="35" y1="492" x2="65" y2="492" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="5,3"/>
+      <text x="72" y="496" fill="#8b90a5" font-size="10">Frozen (no grad)</text>
+      <line x1="160" y1="492" x2="190" y2="492" stroke="#34d399" stroke-width="1.5"/>
+      <text x="197" y="496" fill="#8b90a5" font-size="10">Trainable</text>
+    </svg>
+  </div>
+</section>
+
+<!-- Module Details -->
+<section>
+  <h2>Module Details</h2>
+  <div class="cards">
+
+    <!-- Qwen Encoder -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(34,211,238,0.12)">&#x1F9CA;</div>
+        <h4>Qwen Encoder</h4>
+        <span class="card-tag tag-frozen">Frozen</span>
+      </div>
+      <div class="detail">
+        <p>调用 <code>self.qwen.model(...)</code> (内部 Transformer)，<strong>不是</strong> <code>self.qwen(...)</code>。
+        后者会计算 LM Head logits (~15GB)，导致 OOM。</p>
+        <p>运行在 <code>torch.no_grad()</code> 中。输出 <code>last_hidden_state</code> 后立即 <code>.detach()</code>。</p>
+        <div class="dim-flow">(B, seq_len) <span class="arr">→</span> (B, seq_len, hidden_size)</div>
+      </div>
+    </div>
+
+    <!-- DownProj -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(52,211,153,0.12)">&#x2B07;</div>
+        <h4>DownProj</h4>
+        <span class="card-tag tag-optional">Default: Identity</span>
+      </div>
+      <div class="detail">
+        <p>将 Qwen hidden states 投影到 Perceiver 维度。由于 <code>perceiver_dim == qwen.hidden_size</code>，默认为 Identity（无参数）。</p>
+        <p>三种模式用于消融实验：</p>
+        <table class="config-table">
+          <tr><th>Mode</th><th>Structure</th></tr>
+          <tr><td><code>identity</code></td><td>直通，无参数</td></tr>
+          <tr><td><code>linear</code></td><td>Linear + LayerNorm</td></tr>
+          <tr><td><code>mlp</code></td><td>Linear → GELU → Linear → LN</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- QueryInit -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(244,114,182,0.12)">&#x1F50D;</div>
+        <h4>QueryInit</h4>
+        <span class="card-tag tag-trainable">Trainable</span>
+      </div>
+      <div class="detail">
+        <p><strong>可学习基础查询 + 问题条件偏置。</strong></p>
+        <p><code>base_queries</code>: <code>nn.Parameter(randn(Q, D) * 0.02)</code></p>
+        <p><code>question_proj</code>: <code>Linear(qwen_dim, perceiver_dim)</code></p>
+        <p>NTP 阶段 (Stage 1): 问题向量为零 → 使用纯基础查询。<br>
+        QA 阶段 (Stage 2): 问题经 mean pool → 线性投影为 additive bias。</p>
+        <div class="dim-flow">(B, qwen_dim) <span class="arr">→</span> (B, Q, perceiver_dim)</div>
+      </div>
+    </div>
+
+    <!-- GuidedPerceiver -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(167,139,250,0.12)">&#x1F5DC;</div>
+        <h4>GuidedPerceiver</h4>
+        <span class="card-tag tag-trainable">Trainable</span>
+      </div>
+      <div class="detail">
+        <p>三阶段注意力压缩架构，将长文档序列压缩为固定长度隐向量。每个 Stage 可通过 <code>AblationConfig</code> 独立开关。</p>
+      </div>
+      <div class="perceiver-stages">
+        <div class="stage-box stage-a">
+          <h5>Stage A — Global Compression</h5>
+          <div class="layers">
+            <strong>Cross-Attention</strong> (2 layers)<br>
+            queries ← byte_array<br>
+            <strong>Self-Attention</strong> (2 layers)<br>
+            queries 内部交互<br>
+            <br>
+            <em>从文档中提取全局信息</em>
+          </div>
+        </div>
+        <div class="stage-box stage-b">
+          <h5>Stage B — Self Refinement</h5>
+          <div class="layers">
+            <strong>Self-Attention</strong> (2 layers)<br>
+            queries 之间的信息融合<br>
+            <br><br>
+            <em>整合与精炼已提取的信息</em>
+          </div>
+        </div>
+        <div class="stage-box stage-c">
+          <h5>Stage C — Deep Reasoning</h5>
+          <div class="layers">
+            <strong>Cross-Attention</strong> (2 layers)<br>
+            回读 byte_array 获取细节<br>
+            <strong>Self-Attention</strong> (4 layers)<br>
+            深层推理处理<br>
+            <em>补充细节，深层推理</em>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="dim-flow">queries (B, Q, D) + byte_array (B, doc_len, D) <span class="arr">→</span> latent_array (B, Q, D)</div>
+      </div>
+    </div>
+
+    <!-- UpMLP -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(251,146,60,0.12)">&#x2B06;</div>
+        <h4>UpMLP</h4>
+        <span class="card-tag tag-optional">Default: Identity</span>
+      </div>
+      <div class="detail">
+        <p>将 Perceiver 维度映射回 Qwen 维度。默认 Identity，结构与 DownProj 对称。</p>
+        <p>输出作为 <strong>prefix embeddings</strong>，与 question+answer token embeddings 拼接后送入 Qwen Decoder。</p>
+        <div class="dim-flow">(B, Q, perceiver_dim) <span class="arr">→</span> (B, Q, qwen_dim)</div>
+      </div>
+    </div>
+
+    <!-- Qwen Decoder -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:rgba(34,211,238,0.12)">&#x1F9CA;</div>
+        <h4>Qwen Decoder</h4>
+        <span class="card-tag tag-frozen">Frozen</span>
+      </div>
+      <div class="detail">
+        <p>调用 <code>self.qwen(inputs_embeds=...)</code> 包含 LM Head，计算 next-token logits。</p>
+        <p>输入: <code>[prefix_embeds | q_embeds | a_embeds]</code><br>
+        Labels: <code>[-100 (prefix) | -100 (question) | answer_labels]</code></p>
+        <p style="color:var(--red);font-size:0.82rem">注意: Qwen forward(labels=...) 内部自动 shift，不要手动 shift。</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- Training Stages -->
+<section>
+  <h2>Training Pipeline</h2>
+  <div class="training-grid">
+    <div class="train-card">
+      <h4><span style="color:var(--accent)">&#x2460;</span> Stage 1: NTP Pretraining</h4>
+      <ul>
+        <li>任务：压缩文档 → 前缀 → Next Token Prediction</li>
+        <li>问题向量为零（无问题条件）</li>
+        <li>损失：标准 Cross-Entropy</li>
+        <li>目标：学习通用文档压缩能力</li>
+        <li>可选：Question-Guided Compression，训练时加入问题上下文</li>
+      </ul>
+    </div>
+    <div class="train-card">
+      <h4><span style="color:var(--accent2)">&#x2461;</span> Stage 2: QA Fine-tuning + Distillation</h4>
+      <ul>
+        <li>任务：压缩文档 → 前缀 + 问题 → 回答</li>
+        <li>问题条件查询初始化激活</li>
+        <li>Teacher 看完整未压缩文档 + 问题 + 答案</li>
+        <li>Student 看压缩前缀 + 问题 + 答案</li>
+        <li>三项损失：QA CE + KL Distill + Hidden MSE</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Loss Functions -->
+<section>
+  <h2>Loss Functions</h2>
+
+  <div class="loss-eq">
+    <span class="var">L<sub>total</sub></span>
+    <span class="op"> = </span>
+    <span class="w">&lambda;<sub>ce</sub></span> &middot; <span class="var">L<sub>QA-CE</sub></span>
+    <span class="op"> + </span>
+    <span class="w">&lambda;<sub>kl</sub></span> &middot; <span class="var">L<sub>KL</sub></span>
+    <span class="op"> + </span>
+    <span class="w">&lambda;<sub>mse</sub></span> &middot; <span class="var">L<sub>Hidden-MSE</sub></span>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>QA Cross-Entropy</h3>
+      <div class="detail">
+        <p>标准自回归语言模型损失。仅对 answer 位置计算，prefix 和 question 位置标记为 -100。</p>
+        <p>Stage 1 (NTP): 对续写文本位置计算。<br>
+        Stage 2 (QA): 对答案 token 位置计算。</p>
+        <p>Default weight: <code>&lambda;<sub>ce</sub> = 1.0</code></p>
+      </div>
+    </div>
+    <div class="card">
+      <h3>KL Distillation</h3>
+      <div class="detail">
+        <p>Student 与 Teacher 输出分布的 KL 散度。对 answer mask 位置计算，使用温度缩放。</p>
+        <p><code>T = 2.0</code>，最终乘以 <code>T&sup2;</code> (distillation convention)。</p>
+        <p>Default weight: <code>&lambda;<sub>kl</sub> = 0.2</code></p>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Hidden State MSE</h3>
+      <div class="detail">
+        <p>选定解码器层 ([7, 14, 21, 27]) 的 student/teacher hidden state 之间的 MSE 损失。</p>
+        <p>对 question+answer 共享位置计算。权重线性 ramp：前 2000 步从 0 逐步上升到 1，避免早期训练不稳定。</p>
+        <p>Default weight: <code>&lambda;<sub>mse</sub> = 0.0</code> (默认关闭)</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Gradient Flow -->
+<section>
+  <h2>Gradient Flow</h2>
+  <div class="constraint-box" style="border-color:rgba(52,211,153,0.3);background:linear-gradient(135deg, rgba(52,211,153,0.04), rgba(34,211,238,0.04))">
+    <h4 style="color:var(--green)">Frozen vs Trainable</h4>
+    <p>所有 Qwen 参数 <code>requires_grad=False</code>。Frozen Qwen 前向传播在 <code>torch.no_grad()</code> 上下文中运行。</p>
+    <p>可训练模块：<strong style="color:var(--green)">QueryInit</strong>、<strong style="color:var(--green)">GuidedPerceiver</strong>；消融时可选 <strong style="color:var(--green)">DownProj</strong>、<strong style="color:var(--green)">UpMLP</strong>。</p>
+    <p>这些可训练模块在 no_grad 上下文<strong style="color:var(--text)">外部</strong>调用，以保留梯度流。Checkpoint 仅保存可训练权重（跳过 <code>qwen.*</code> 参数）。</p>
+    <p style="color:var(--orange);margin-bottom:0">Gradient checkpointing 需要 <code>use_reentrant=False</code>，否则梯度静默中断。</p>
+  </div>
+</section>
+
+<!-- Qwen3 Models -->
+<section>
+  <h2>Supported Models</h2>
+  <div class="flow-container">
+    <table class="config-table">
+      <tr>
+        <th>Model</th>
+        <th>hidden_size</th>
+        <th>num_layers</th>
+        <th>vocab_size</th>
+        <th>perceiver_dim</th>
+      </tr>
+      <tr>
+        <td><code>Qwen3-0.6B</code></td>
+        <td>1024</td>
+        <td>28</td>
+        <td>151,936</td>
+        <td>1024</td>
+      </tr>
+      <tr>
+        <td><code>Qwen3-1.7B</code></td>
+        <td>2048</td>
+        <td>28</td>
+        <td>151,936</td>
+        <td>2048</td>
+      </tr>
+      <tr>
+        <td><code>Qwen3-4B</code></td>
+        <td>2560</td>
+        <td>36</td>
+        <td>151,936</td>
+        <td>2560</td>
+      </tr>
+      <tr>
+        <td><code>Qwen3-8B</code></td>
+        <td>4096</td>
+        <td>36</td>
+        <td>151,936</td>
+        <td>4096</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<!-- Default Config -->
+<section>
+  <h2>Default Perceiver Config</h2>
+  <div class="flow-container">
+    <table class="config-table">
+      <tr><th>Parameter</th><th>Value</th><th>Description</th></tr>
+      <tr><td><code>num_queries</code></td><td>64</td><td>压缩后的序列长度 (Q)</td></tr>
+      <tr><td><code>num_heads</code></td><td>16</td><td>多头注意力头数</td></tr>
+      <tr><td><code>head_dim</code></td><td>64</td><td>每头维度 (auto: perceiver_dim / num_heads)</td></tr>
+      <tr><td><code>ff_mult</code></td><td>4</td><td>FFN 隐层倍数</td></tr>
+      <tr><td><code>stage_a_cross_layers</code></td><td>2</td><td>Stage A Cross-Attention 层数</td></tr>
+      <tr><td><code>stage_a_self_layers</code></td><td>2</td><td>Stage A Self-Attention 层数</td></tr>
+      <tr><td><code>stage_b_layers</code></td><td>2</td><td>Stage B Self-Attention 层数</td></tr>
+      <tr><td><code>stage_c_cross_layers</code></td><td>2</td><td>Stage C Cross-Attention 层数</td></tr>
+      <tr><td><code>stage_c_self_layers</code></td><td>4</td><td>Stage C Self-Attention 层数</td></tr>
+      <tr><td><code>dropout</code></td><td>0.1</td><td>Dropout rate</td></tr>
+    </table>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  Deep Compressor Architecture &mdash; Generated 2026-03-11
+</footer>
+
+</body>
+</html>
