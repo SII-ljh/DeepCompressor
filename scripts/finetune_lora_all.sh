@@ -19,7 +19,7 @@ EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
 NUM_EPOCHS="${NUM_EPOCHS:-2}"
 MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
 
-# Model sizes and their per-GPU batch sizes (tuned for 80GB A100)
+# Model sizes and their per-GPU batch sizes (tuned for 8x H200 141GB)
 declare -A MODEL_PATHS
 MODEL_PATHS["0.6B"]="models/Qwen3-0.6B"
 MODEL_PATHS["1.7B"]="models/Qwen3-1.7B"
@@ -27,16 +27,16 @@ MODEL_PATHS["4B"]="models/Qwen3-4B"
 MODEL_PATHS["8B"]="models/Qwen3-8B"
 
 declare -A BATCH_SIZES
-BATCH_SIZES["0.6B"]=32
-BATCH_SIZES["1.7B"]=16
-BATCH_SIZES["4B"]=8
-BATCH_SIZES["8B"]=4
+BATCH_SIZES["0.6B"]=64
+BATCH_SIZES["1.7B"]=32
+BATCH_SIZES["4B"]=16
+BATCH_SIZES["8B"]=8
 
 declare -A GRAD_ACCUM
 GRAD_ACCUM["0.6B"]=1
-GRAD_ACCUM["1.7B"]=2
-GRAD_ACCUM["4B"]=4
-GRAD_ACCUM["8B"]=8
+GRAD_ACCUM["1.7B"]=1
+GRAD_ACCUM["4B"]=2
+GRAD_ACCUM["8B"]=4
 
 if [ $# -gt 0 ]; then
     SIZES=("$@")
