@@ -277,39 +277,14 @@ def evaluate(model, eval_loader: DataLoader, tokenizer, accelerator: Accelerator
 
 
 def train(args):
-    # ── Accelerator setup ──
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation,
-        mixed_precision="bf16" if torch.cuda.is_available() else "no",
-        kwargs_handlers=[ddp_kwargs],
-    )
-
-    if accelerator.is_main_process:
-        print("=" * 72)
-        print("  LoRA Fine-tuning Qwen for QA (Upper Bound Baseline)")
-        print("=" * 72)
-        print(f"  Model:           {args.model_name_or_path}")
-        print(f"  Train data:      {args.train_data}")
-        print(f"  Eval data:       {args.eval_data}")
-        print(f"  Epochs:          {args.num_epochs}")
-        print(f"  Batch size/GPU:  {args.batch_size}")
-        print(f"  Grad accum:      {args.gradient_accumulation}")
-        print(f"  Num processes:   {accelerator.num_processes}")
-        eff_bs = args.batch_size * args.gradient_accumulation * accelerator.num_processes
-        print(f"  Effective batch: {eff_bs}")
-        print(f"  Learning rate:   {args.learning_rate}")
-        print(f"  LoRA r:          {args.lora_r}")
-        print(f"  Output dir:      {args.output_dir}")
-        print("=" * 72)
-        print()
+    is_main = os.environ.get("RANK", "0") == "0"
 
     # ── cuDNN SDPA workaround ──
     if torch.cuda.is_available():
         torch.backends.cuda.enable_cudnn_sdp(False)
 
     # ── Load model + tokenizer ──
-    if accelerator.is_main_process:
+    if is_main:
         print("Loading model and tokenizer...")
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -340,8 +315,81 @@ def train(args):
     )
     model = get_peft_model(model, lora_config)
 
-    if accelerator.is_main_process:
+    if is_main:
         model.print_trainable_parameters()
+
+    # ── Auto batch size detection (before Accelerator) ──
+    if args.auto_batch_size:
+        import gc
+
+        from deep_compressor.auto_batch import (
+            build_sample_batch_fn_lora,
+            compute_gradient_accumulation,
+            find_max_batch_size,
+        )
+
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if torch.cuda.is_available():
+            probe_device = torch.device(f"cuda:{local_rank}")
+        else:
+            probe_device = torch.device("cpu")
+
+        model.to(probe_device)
+
+        max_seq_len = args.max_context_tokens + args.max_answer_tokens
+        mp = "bf16" if torch.cuda.is_available() else "no"
+        build_fn = build_sample_batch_fn_lora(
+            max_seq_len, tokenizer.vocab_size, tokenizer.pad_token_id,
+            probe_device)
+
+        def _fwd(m, batch):
+            return m(**batch, use_cache=False).loss
+
+        max_bs = find_max_batch_size(
+            model, build_fn, _fwd, probe_device, mixed_precision=mp)
+        args.batch_size = max_bs
+
+        num_gpus = int(os.environ.get("WORLD_SIZE", "1"))
+        args.gradient_accumulation = compute_gradient_accumulation(
+            max_bs, num_gpus, args.target_effective_batch_size)
+
+        effective = max_bs * num_gpus * args.gradient_accumulation
+        if is_main:
+            print(f"Auto batch: bs={max_bs}, grad_accum={args.gradient_accumulation}, "
+                  f"num_gpus={num_gpus}, effective={effective} "
+                  f"(target={args.target_effective_batch_size})")
+
+        model.to("cpu")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # ── Accelerator setup ──
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation,
+        mixed_precision="bf16" if torch.cuda.is_available() else "no",
+        kwargs_handlers=[ddp_kwargs],
+    )
+
+    if accelerator.is_main_process:
+        print("=" * 72)
+        print("  LoRA Fine-tuning Qwen for QA (Upper Bound Baseline)")
+        print("=" * 72)
+        print(f"  Model:           {args.model_name_or_path}")
+        print(f"  Train data:      {args.train_data}")
+        print(f"  Eval data:       {args.eval_data}")
+        print(f"  Epochs:          {args.num_epochs}")
+        print(f"  Batch size/GPU:  {args.batch_size}")
+        print(f"  Grad accum:      {args.gradient_accumulation}")
+        print(f"  Num processes:   {accelerator.num_processes}")
+        eff_bs = args.batch_size * args.gradient_accumulation * accelerator.num_processes
+        print(f"  Effective batch: {eff_bs}")
+        print(f"  Learning rate:   {args.learning_rate}")
+        print(f"  LoRA r:          {args.lora_r}")
+        print(f"  Output dir:      {args.output_dir}")
+        print("=" * 72)
+        print()
 
     # ── Datasets ──
     if accelerator.is_main_process:
@@ -638,6 +686,12 @@ def main():
                         help="Max tokens to generate during eval")
     parser.add_argument("--log_every_steps", type=int, default=50,
                         help="Print training loss every N steps")
+
+    # Auto batch size
+    parser.add_argument("--auto_batch_size", action="store_true",
+                        help="Auto-detect max per-GPU batch size via memory probing")
+    parser.add_argument("--target_effective_batch_size", type=int, default=256,
+                        help="Target effective batch size for auto gradient_accumulation (default: 256)")
 
     # Output
     parser.add_argument("--output_dir", type=str, default="outputs/lora_qwen",

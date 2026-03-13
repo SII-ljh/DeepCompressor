@@ -91,6 +91,9 @@ class TrainingConfig:
     gradient_checkpointing: bool = False
     mixed_precision: str = "no"  # "no", "fp16", "bf16"
     early_stopping_patience: int = 0  # 0 = disabled; N = stop after N evals with no improvement
+    epochs: int = 0                        # 0 = use max_steps; >0 = epoch-based
+    auto_batch_size: bool = False          # auto-detect max per-GPU batch size
+    target_effective_batch_size: int = 256 # target for auto gradient_accumulation
 
 
 @dataclass
@@ -172,6 +175,14 @@ class DeepCompressorConfig:
             raise ValueError(f"Invalid up_proj_mode: {ab.up_proj_mode}")
         if ab.override_num_queries < 0:
             raise ValueError(f"override_num_queries must be >= 0, got {ab.override_num_queries}")
+        # Validate training config
+        if self.training.epochs < 0:
+            raise ValueError(f"epochs must be >= 0, got {self.training.epochs}")
+        if self.training.target_effective_batch_size < 1:
+            raise ValueError(
+                f"target_effective_batch_size must be >= 1, "
+                f"got {self.training.target_effective_batch_size}"
+            )
 
     @property
     def effective_num_queries(self) -> int:

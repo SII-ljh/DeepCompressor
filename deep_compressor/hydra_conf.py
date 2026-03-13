@@ -88,6 +88,10 @@ class TrainingHydraConf:
     output_dir: str = "outputs"
     gradient_checkpointing: bool = False
     mixed_precision: str = "no"
+    early_stopping_patience: int = 0
+    epochs: int = 0
+    auto_batch_size: bool = False
+    target_effective_batch_size: int = 256
 
 
 @dataclass

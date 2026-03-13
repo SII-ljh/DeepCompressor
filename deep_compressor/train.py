@@ -26,6 +26,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import os
 import re
 import sys
@@ -241,7 +242,12 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
     best_metric = float("inf")  # track best eval loss for saving best checkpoint
     patience_counter = 0  # early stopping counter
 
+    current_epoch = 0
+
     while completed_steps < tcfg.max_steps:
+        current_epoch += 1
+        if tcfg.epochs > 0 and accelerator.is_main_process:
+            logger.info(f"Epoch {current_epoch}/{tcfg.epochs}")
         for batch in train_loader:
             with accelerator.accumulate(model):
                 fwd_kwargs = _build_forward_kwargs(batch, completed_steps)
@@ -442,6 +448,91 @@ def _run_training(config: DeepCompressorConfig,
     """
     tcfg = config.training
 
+    # ── early logging (before Accelerator) ──
+    _is_main = os.environ.get("RANK", "0") == "0"
+    if _is_main:
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s - %(name)s - %(message)s")
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    # ── tokenizer ──
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.qwen.model_name_or_path,
+        trust_remote_code=True,
+        fix_mistral_regex=True  # Fix tokenizer regex warning
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # ── model ──
+    model = DeepCompressor(config)
+
+    if tcfg.gradient_checkpointing:
+        model.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        logger.info("Gradient checkpointing enabled for Qwen")
+
+    if resume_from:
+        weights = torch.load(
+            os.path.join(resume_from, "trainable_weights.pt"),
+            map_location="cpu", weights_only=True)
+        model.load_state_dict(weights, strict=False)
+        logger.info(f"Resumed from {resume_from}")
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    logger.info(f"Trainable: {trainable:,} / {total:,} "
+                f"({100*trainable/total:.1f}%)")
+
+    # ── auto batch size detection (before Accelerator) ──
+    if tcfg.auto_batch_size:
+        import gc
+
+        from deep_compressor.auto_batch import (
+            build_sample_batch_fn_qa,
+            compute_gradient_accumulation,
+            find_max_batch_size,
+        )
+
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if torch.cuda.is_available():
+            probe_device = torch.device(f"cuda:{local_rank}")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            probe_device = torch.device("mps")
+        else:
+            probe_device = torch.device("cpu")
+
+        model.to(probe_device)
+
+        build_fn = build_sample_batch_fn_qa(
+            config, config.qwen.vocab_size, probe_device)
+
+        def _probe_forward(m, batch):
+            losses = m(**batch, global_step=0)
+            return losses["total"]
+
+        max_bs = find_max_batch_size(
+            model, build_fn, _probe_forward, probe_device,
+            mixed_precision=tcfg.mixed_precision,
+        )
+        tcfg.batch_size = max_bs
+
+        num_gpus = int(os.environ.get("WORLD_SIZE", "1"))
+        tcfg.gradient_accumulation_steps = compute_gradient_accumulation(
+            max_bs, num_gpus, tcfg.target_effective_batch_size)
+
+        effective = max_bs * num_gpus * tcfg.gradient_accumulation_steps
+        logger.info(
+            f"Auto batch: bs={max_bs}, grad_accum={tcfg.gradient_accumulation_steps}, "
+            f"num_gpus={num_gpus}, effective={effective} "
+            f"(target={tcfg.target_effective_batch_size})")
+
+        # Move model back to CPU for Accelerator to handle device placement
+        model.to("cpu")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     # ── accelerator ──
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 
@@ -455,13 +546,6 @@ def _run_training(config: DeepCompressorConfig,
         kwargs_handlers=[ddp_kwargs],
         log_with=log_with or None,
     )
-
-    # Logging: only main process gets INFO
-    if accelerator.is_main_process:
-        logging.basicConfig(level=logging.INFO,
-                            format="%(asctime)s - %(name)s - %(message)s")
-    else:
-        logging.basicConfig(level=logging.WARNING)
 
     logger.info(f"Device: {accelerator.device}  |  "
                 f"Processes: {accelerator.num_processes}  |  "
@@ -508,34 +592,6 @@ def _run_training(config: DeepCompressorConfig,
             init_kwargs=init_kwargs,
         )
 
-    # ── tokenizer ──
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.qwen.model_name_or_path,
-        trust_remote_code=True,
-        fix_mistral_regex=True  # Fix tokenizer regex warning
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # ── model ──
-    model = DeepCompressor(config)
-
-    if tcfg.gradient_checkpointing:
-        model.qwen.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        logger.info("Gradient checkpointing enabled for Qwen")
-
-    if resume_from:
-        weights = torch.load(
-            os.path.join(resume_from, "trainable_weights.pt"),
-            map_location="cpu", weights_only=True)
-        model.load_state_dict(weights, strict=False)
-        logger.info(f"Resumed from {resume_from}")
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    logger.info(f"Trainable: {trainable:,} / {total:,} "
-                f"({100*trainable/total:.1f}%)")
-
     # ── dataloader ──
     collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
     # MPS doesn't support multi-process data loading reliably
@@ -575,6 +631,25 @@ def _run_training(config: DeepCompressorConfig,
                                  num_workers=num_workers,
                                  pin_memory=pin_memory)
         logger.info(f"QA eval: {len(eval_ds):,} samples")
+
+    # ── epoch-based training ──
+    if tcfg.epochs > 0:
+        dataset_size = len(dataset)
+        effective_batch = (tcfg.batch_size
+                           * tcfg.gradient_accumulation_steps
+                           * accelerator.num_processes)
+        steps_per_epoch = math.ceil(dataset_size / effective_batch)
+        tcfg.max_steps = steps_per_epoch * tcfg.epochs
+
+        # Auto-set warmup to 5% if still at default (1000)
+        if tcfg.warmup_steps == 1000:
+            tcfg.warmup_steps = max(1, int(0.05 * tcfg.max_steps))
+
+        logger.info(
+            f"Epoch-based training: {tcfg.epochs} epochs, "
+            f"{steps_per_epoch} steps/epoch, "
+            f"{tcfg.max_steps} total steps, "
+            f"warmup={tcfg.warmup_steps}")
 
     last_metrics = None
     _, last_metrics = train_stage(

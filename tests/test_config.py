@@ -81,6 +81,36 @@ def test_qwen3_registry_bad_num_heads():
         )
 
 
+def test_training_config_new_defaults():
+    """New training config fields have correct defaults."""
+    cfg = DeepCompressorConfig()
+    assert cfg.training.epochs == 0
+    assert cfg.training.auto_batch_size is False
+    assert cfg.training.target_effective_batch_size == 256
+
+
+def test_epochs_validation():
+    """epochs must be >= 0."""
+    with pytest.raises(ValueError, match="epochs must be >= 0"):
+        DeepCompressorConfig(
+            qwen=QwenConfig(model_name_or_path="tiny", hidden_size=64, num_hidden_layers=4),
+            perceiver=PerceiverConfig(perceiver_dim=64, num_heads=4, head_dim=16),
+            loss=LossConfig(hidden_distill_layers=[1, 3]),
+            training=TrainingConfig(epochs=-1),
+        )
+
+
+def test_target_effective_batch_size_validation():
+    """target_effective_batch_size must be >= 1."""
+    with pytest.raises(ValueError, match="target_effective_batch_size must be >= 1"):
+        DeepCompressorConfig(
+            qwen=QwenConfig(model_name_or_path="tiny", hidden_size=64, num_hidden_layers=4),
+            perceiver=PerceiverConfig(perceiver_dim=64, num_heads=4, head_dim=16),
+            loss=LossConfig(hidden_distill_layers=[1, 3]),
+            training=TrainingConfig(target_effective_batch_size=0),
+        )
+
+
 def test_from_yaml(tmp_path):
     yaml_content = """
 qwen:
