@@ -15,6 +15,8 @@
 #   NUM_EPOCHS=2                # number of epochs (default: 1)
 #   MAX_EVAL_SAMPLES=1000       # limit eval samples (default: 5000)
 
+set -o pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -37,10 +39,10 @@ fi
 get_model_info() {
     local model=$1
     case $model in
-        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; LR=2e-4; LORA_R=16; CKPT="" ;;
-        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; LR=2e-4; LORA_R=16; CKPT="" ;;
-        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing" ;;
-        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing" ;;
+        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; LR=2e-4; LORA_R=16; CKPT=""; EVAL_BS=8 ;;
+        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; LR=2e-4; LORA_R=16; CKPT=""; EVAL_BS=5 ;;
+        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing"; EVAL_BS=2 ;;
+        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing"; EVAL_BS=1 ;;
         *)    echo "Unknown model: $model (supported: 0.6b 1.7b 4b 8b)"; return 1 ;;
     esac
 }
@@ -97,7 +99,7 @@ for MODEL in "${MODELS[@]}"; do
     OUTPUT_DIR="outputs/lora_qwen3-${MODEL}"
 
     echo "----------------------------------------------------------------------"
-    echo "[$NAME] auto batch | target_ebs=$TARGET_EBS | lr=$LR | lora_r=$LORA_R ${CKPT:+| grad_ckpt}"
+    echo "[$NAME] auto batch | target_ebs=$TARGET_EBS | lr=$LR | lora_r=$LORA_R | eval_bs=$EVAL_BS ${CKPT:+| grad_ckpt}"
     echo "----------------------------------------------------------------------"
 
     CMD="accelerate launch \
@@ -114,6 +116,8 @@ for MODEL in "${MODELS[@]}"; do
     --learning_rate $LR \
     --lora_r $LORA_R \
     --num_epochs $NUM_EPOCHS \
+    --eval_batch_size $EVAL_BS \
+    --eval_every_steps 250 \
     --output_dir $OUTPUT_DIR \
     $CKPT"
 
@@ -128,6 +132,7 @@ for MODEL in "${MODELS[@]}"; do
     fi
 
     mkdir -p "$OUTPUT_DIR"
+    export WANDB_MODE=offline
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     START_SEC=$SECONDS

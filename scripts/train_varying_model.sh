@@ -11,7 +11,7 @@
 # Environment variables:
 #   NGPUS=4                     # number of GPUs (default: 8)
 #   TARGET_EBS=128              # target effective batch size (default: 256)
-#   EPOCHS=3                    # epoch-based training (default: 0 = use max_steps from config)
+#   EPOCHS=3                    # epoch-based training (default: 2)
 #   MAX_EVAL_SAMPLES=1000       # limit eval samples (default: 5000)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,7 +47,7 @@ get_display_name() {
 # ── Common settings ──────────────────────────────────────────────────────────
 NUM_GPUS="${NGPUS:-8}"
 TARGET_EBS="${TARGET_EBS:-256}"
-EPOCHS="${EPOCHS:-0}"
+EPOCHS="${EPOCHS:-2}"
 Q_VALUE=512
 DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
