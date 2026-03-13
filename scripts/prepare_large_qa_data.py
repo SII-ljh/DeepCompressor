@@ -1124,39 +1124,10 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
                 print(f"  FAIL DRCD: {e}", flush=True)
                 traceback.print_exc()
 
-        # 13. WebQA (Chinese web)
+        # 13. WebQA — SKIPPED (no HuggingFace repo has context+question+answer format;
+        #      suolyer/webqa only has input/output without document context)
         idx += 1
-        print(f"[{idx}/{total_datasets}] WebQA", flush=True)
-        if not no_cache and _try_load_cache("webqa", train_all, dev_all):
-            pass
-        else:
-            print("  Loading ...", flush=True)
-            try:
-                with _Timer("WebQA"):
-                    webqa_loaded = False
-                    for repo in ["suolyer/webqa", "THUDM/webqa"]:
-                        try:
-                            print(f"    trying repo: {repo} ...", flush=True)
-                            wq_train = _convert_webqa(load_dataset(repo, split="train"),
-                                                      max_train, source="webqa")
-                            try:
-                                wq_dev = _convert_webqa(load_dataset(repo, split="validation"),
-                                                        max_dev, source="webqa")
-                            except Exception:
-                                wq_dev = []
-                            train_all.extend(wq_train)
-                            dev_all.extend(wq_dev)
-                            print(f"  OK WebQA: train={len(wq_train):,}, dev={len(wq_dev):,}", flush=True)
-                            _cache_save("webqa", wq_train, wq_dev)
-                            webqa_loaded = True
-                            break
-                        except Exception:
-                            continue
-                    if not webqa_loaded:
-                        print(f"  FAIL WebQA: all repos failed or not available", flush=True)
-            except Exception as e:
-                print(f"  FAIL WebQA: {e}", flush=True)
-                traceback.print_exc()
+        print(f"[{idx}/{total_datasets}] WebQA: SKIPPED (no context field in available repos)", flush=True)
     else:
         idx += 4
         print(f"[10-{idx}/{total_datasets}] Chinese datasets: skipped (only_english=True)")
