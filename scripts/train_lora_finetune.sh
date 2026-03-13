@@ -31,10 +31,10 @@ fi
 get_hparams() {
     local model=$1
     case $model in
-        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; BATCH=20; ACCUM=2;  LR=2e-4; LORA_R=16; EPOCHS=2; CKPT="" ;;
-        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; BATCH=12; ACCUM=4;  LR=2e-4; LORA_R=16; EPOCHS=2; CKPT="" ;;
-        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   BATCH=8;  ACCUM=4;  LR=1e-4; LORA_R=16; EPOCHS=2; CKPT="--gradient_checkpointing" ;;
-        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   BATCH=4;  ACCUM=8;  LR=1e-4; LORA_R=16; EPOCHS=2; CKPT="--gradient_checkpointing" ;;
+        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; BATCH=20; ACCUM=2;  LR=2e-4; LORA_R=16; EPOCHS=1; CKPT="" ;;
+        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; BATCH=12; ACCUM=4;  LR=2e-4; LORA_R=16; EPOCHS=1; CKPT="" ;;
+        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   BATCH=8;  ACCUM=4;  LR=1e-4; LORA_R=16; EPOCHS=1; CKPT="--gradient_checkpointing" ;;
+        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   BATCH=4;  ACCUM=8;  LR=1e-4; LORA_R=16; EPOCHS=1; CKPT="--gradient_checkpointing" ;;
         *)    echo "Unknown model: $model (supported: 0.6b 1.7b 4b 8b)"; return 1 ;;
     esac
 }
