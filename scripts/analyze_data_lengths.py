@@ -216,10 +216,10 @@ def analyze_dataset(data_path, tokenizer_path, max_doc, max_q, max_a,
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze token length distribution of QA datasets")
-    parser.add_argument("--data", required=True,
-                        help="Path to training data (JSON)")
-    parser.add_argument("--eval_data", default=None,
-                        help="Path to eval data (JSON, optional)")
+    parser.add_argument("--data", default="data/qa_large_train.json",
+                        help="Path to training data (default: data/qa_large_train.json)")
+    parser.add_argument("--eval_data", default="data/qa_large_dev.json",
+                        help="Path to eval data (default: data/qa_large_dev.json)")
     parser.add_argument("--model", default="models/Qwen3-0.6B",
                         help="Tokenizer model path (default: models/Qwen3-0.6B)")
     parser.add_argument("--max_doc", type=int, default=4096,
@@ -228,12 +228,12 @@ def main():
                         help="Max question tokens (default: 256)")
     parser.add_argument("--max_a", type=int, default=512,
                         help="Max answer tokens (default: 512)")
-    parser.add_argument("--num_workers", type=int, default=8,
-                        help="Parallel workers for tokenization (default: 8)")
+    parser.add_argument("--num_workers", type=int, default=20,
+                        help="Parallel workers for tokenization (default: 20)")
     parser.add_argument("--sample", type=int, default=0,
                         help="Random sample size (0=all, default: 0)")
-    parser.add_argument("--output", default=None,
-                        help="Save results to JSON file")
+    parser.add_argument("--output", default="results/data_length_stats.json",
+                        help="Save results to JSON file (default: results/data_length_stats.json)")
     args = parser.parse_args()
 
     results = {}
