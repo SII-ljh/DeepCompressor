@@ -720,7 +720,12 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
     Supports resume: each dataset is cached after download. Re-running
     skips already-cached datasets. Use --no-cache to force re-download.
     """
-    from datasets import load_dataset
+    from functools import partial
+    from datasets import load_dataset as _load_dataset_raw
+
+    # Wrap load_dataset to always pass trust_remote_code=True
+    # This enables QuAC, MLQA, and other datasets that use custom loading scripts.
+    load_dataset = partial(_load_dataset_raw, trust_remote_code=True)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -894,11 +899,38 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
                 traceback.print_exc()
 
         # 6. QuAC (conversational QA)
-        # NOTE: allenai/quac uses legacy dataset scripts, no parquet alternative.
-        # Blocked by datasets>=4.x. Skip gracefully.
         idx += 1
-        print(f"[{idx}/{total_datasets}] QuAC: SKIPPED (no parquet-format repo available, "
-              "allenai/quac uses legacy dataset scripts blocked by datasets>=4.x)")
+        print(f"[{idx}/{total_datasets}] QuAC", flush=True)
+        if not no_cache and _try_load_cache("quac", train_all, dev_all):
+            pass
+        else:
+            print("  Loading ...", flush=True)
+            try:
+                with _Timer("QuAC"):
+                    quac_loaded = False
+                    for repo in ["allenai/quac", "quac"]:
+                        try:
+                            print(f"    trying repo: {repo} ...", flush=True)
+                            quac_train = _convert_quac(
+                                load_dataset(repo, split="train"),
+                                max_train, source="quac")
+                            quac_dev = _convert_quac(
+                                load_dataset(repo, split="validation"),
+                                max_dev, source="quac")
+                            train_all.extend(quac_train)
+                            dev_all.extend(quac_dev)
+                            print(f"  OK QuAC: train={len(quac_train):,}, dev={len(quac_dev):,}", flush=True)
+                            _cache_save("quac", quac_train, quac_dev)
+                            quac_loaded = True
+                            break
+                        except Exception as e2:
+                            print(f"    - repo '{repo}' failed: {e2}", flush=True)
+                            continue
+                    if not quac_loaded:
+                        print(f"  FAIL QuAC: all repos failed", flush=True)
+            except Exception as e:
+                print(f"  FAIL QuAC: {e}", flush=True)
+                traceback.print_exc()
 
         # 7. DROP (discrete reasoning)
         idx += 1
@@ -1162,11 +1194,63 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
     # ========== Multilingual Datasets ==========
 
     # 14. MLQA (English + Chinese)
-    # NOTE: facebook/mlqa uses legacy dataset scripts, blocked by datasets>=4.x.
-    # Skip gracefully.
     idx += 1
-    print(f"[{idx}/{total_datasets}] MLQA: SKIPPED (no parquet-format repo available, "
-          "facebook/mlqa uses legacy dataset scripts blocked by datasets>=4.x)")
+    print(f"[{idx}/{total_datasets}] MLQA", flush=True)
+    if not no_cache and _try_load_cache("mlqa", train_all, dev_all):
+        pass
+    else:
+        print("  Loading ...", flush=True)
+        try:
+            with _Timer("MLQA"):
+                mlqa_all_train, mlqa_all_dev = [], []
+                mlqa_loaded = False
+                for repo in ["facebook/mlqa", "mlqa"]:
+                    try:
+                        print(f"    trying repo: {repo} ...", flush=True)
+                        if not skip_english:
+                            mlqa_en = _convert_squad(
+                                load_dataset(repo, "mlqa-translate-train.en",
+                                             split="train"),
+                                max_train, source="mlqa_en")
+                            mlqa_all_train.extend(mlqa_en)
+                            train_all.extend(mlqa_en)
+                            print(f"  OK MLQA-en train: {len(mlqa_en):,}", flush=True)
+
+                            mlqa_en_dev = _convert_squad(
+                                load_dataset(repo, "mlqa.en.en", split="validation"),
+                                max_dev, source="mlqa_en")
+                            mlqa_all_dev.extend(mlqa_en_dev)
+                            dev_all.extend(mlqa_en_dev)
+                            print(f"  OK MLQA-en dev: {len(mlqa_en_dev):,}", flush=True)
+
+                        if not skip_chinese:
+                            mlqa_zh = _convert_squad(
+                                load_dataset(repo, "mlqa-translate-train.zh",
+                                             split="train"),
+                                max_train, source="mlqa_zh")
+                            mlqa_all_train.extend(mlqa_zh)
+                            train_all.extend(mlqa_zh)
+                            print(f"  OK MLQA-zh train: {len(mlqa_zh):,}", flush=True)
+
+                            mlqa_zh_dev = _convert_squad(
+                                load_dataset(repo, "mlqa.zh.zh", split="validation"),
+                                max_dev, source="mlqa_zh")
+                            mlqa_all_dev.extend(mlqa_zh_dev)
+                            dev_all.extend(mlqa_zh_dev)
+                            print(f"  OK MLQA-zh dev: {len(mlqa_zh_dev):,}", flush=True)
+
+                        mlqa_loaded = True
+                        break
+                    except Exception as e2:
+                        print(f"    - repo '{repo}' failed: {e2}", flush=True)
+                        continue
+                if mlqa_loaded:
+                    _cache_save("mlqa", mlqa_all_train, mlqa_all_dev)
+                else:
+                    print(f"  FAIL MLQA: all repos failed", flush=True)
+        except Exception as e:
+            print(f"  FAIL MLQA: {e}", flush=True)
+            traceback.print_exc()
 
     # 15. XQuAD (English + Chinese)
     idx += 1
