@@ -28,7 +28,7 @@ def _get_gpu_utilization() -> tuple[float, int, int]:
         return 0.0, 0, 0
     allocated = torch.cuda.memory_allocated()
     reserved = torch.cuda.memory_reserved()
-    total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_mem
+    total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
     # Use max(allocated, reserved) as the effective usage
     used = max(allocated, reserved)
     return used / total, used // (1 << 20), total // (1 << 20)
