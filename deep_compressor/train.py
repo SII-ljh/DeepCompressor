@@ -492,6 +492,7 @@ def _run_training(config: DeepCompressorConfig,
             build_sample_batch_fn_qa,
             compute_gradient_accumulation,
             find_max_batch_size,
+            sync_batch_size_across_ranks,
         )
 
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -515,6 +516,9 @@ def _run_training(config: DeepCompressorConfig,
             model, build_fn, _probe_forward, probe_device,
             mixed_precision=tcfg.mixed_precision,
         )
+
+        # Sync across ranks — take the minimum so every GPU can handle it
+        max_bs = sync_batch_size_across_ranks(max_bs)
         tcfg.batch_size = max_bs
 
         num_gpus = int(os.environ.get("WORLD_SIZE", "1"))

@@ -13,6 +13,27 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _is_oom(e: Exception) -> bool:
+    """Check if an exception is an OOM error."""
+    if isinstance(e, torch.cuda.OutOfMemoryError):
+        return True
+    if isinstance(e, RuntimeError) and "out of memory" in str(e).lower():
+        return True
+    return False
+
+
+def _get_gpu_utilization() -> tuple[float, int, int]:
+    """Return (utilization_ratio, used_MB, total_MB) for current CUDA device."""
+    if not torch.cuda.is_available():
+        return 0.0, 0, 0
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_mem
+    # Use max(allocated, reserved) as the effective usage
+    used = max(allocated, reserved)
+    return used / total, used // (1 << 20), total // (1 << 20)
+
+
 def find_max_batch_size(
     model: torch.nn.Module,
     build_batch_fn: Callable[[int], dict],
@@ -22,7 +43,12 @@ def find_max_batch_size(
     min_batch: int = 1,
     mixed_precision: str = "no",
 ) -> int:
-    """Find maximum batch size via descending power-of-2 probe.
+    """Find maximum batch size that achieves high GPU memory utilization.
+
+    Two-phase search:
+      1. Descending power-of-2 to find the rough range [success, fail).
+      2. Binary search refinement between success and fail to find the
+         true maximum batch size, targeting >90% GPU memory utilization.
 
     On MPS/CPU, returns a conservative default (4) with a warning.
 
@@ -38,7 +64,7 @@ def find_max_batch_size(
             training autocast settings.
 
     Returns:
-        Maximum power-of-2 batch size that fits in GPU memory.
+        Maximum batch size that fits in GPU memory.
     """
     if device.type not in ("cuda",):
         warnings.warn(
@@ -49,20 +75,18 @@ def find_max_batch_size(
         )
         return 4
 
-    # Highest power of 2 <= max_batch
-    batch_size = 1
-    while batch_size * 2 <= max_batch:
-        batch_size *= 2
-
     amp_dtype = None
     if mixed_precision == "fp16":
         amp_dtype = torch.float16
     elif mixed_precision == "bf16":
         amp_dtype = torch.bfloat16
 
-    best = min_batch
+    def _try_batch(batch_size: int) -> bool:
+        """Try a forward+backward pass with the given batch size.
 
-    while batch_size >= min_batch:
+        Returns True if it fits, False on OOM.
+        Raises non-OOM errors.
+        """
         try:
             _cleanup_gpu()
             batch = build_batch_fn(batch_size)
@@ -75,28 +99,78 @@ def find_max_batch_size(
 
             loss.backward()
 
-            # Success — this batch size fits
-            best = batch_size
-            logger.info(f"Auto batch size: {batch_size} fits in memory")
-
             model.zero_grad(set_to_none=True)
             del loss, batch
             _cleanup_gpu()
-            break
+            return True
 
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            if "out of memory" not in str(e).lower() and isinstance(e, RuntimeError):
-                raise  # Re-raise non-OOM RuntimeErrors
-
-            logger.info(f"Auto batch size: {batch_size} OOM, trying smaller")
+            if not _is_oom(e):
+                raise
             model.zero_grad(set_to_none=True)
             _cleanup_gpu()
-            batch_size //= 2
+            return False
 
-    if best < min_batch:
-        best = min_batch
+    # ── Phase 1: Descending power-of-2 to find rough range ──
+    # Highest power of 2 <= max_batch
+    probe = 1
+    while probe * 2 <= max_batch:
+        probe *= 2
 
-    logger.info(f"Auto batch size detection result: {best}")
+    lo = min_batch  # largest known-good
+    hi = None       # smallest known-bad (None = not found yet)
+
+    while probe >= min_batch:
+        if _try_batch(probe):
+            lo = probe
+            logger.info(f"Auto batch size phase 1: {probe} fits")
+            break
+        else:
+            hi = probe
+            logger.info(f"Auto batch size phase 1: {probe} OOM")
+            probe //= 2
+
+    if lo < min_batch:
+        lo = min_batch
+
+    # If the largest power of 2 (== max_batch cap) succeeded and no OOM
+    # was seen above it, try max_batch directly as it may be higher.
+    if hi is None and lo < max_batch:
+        if _try_batch(max_batch):
+            lo = max_batch
+            logger.info(f"Auto batch size: max_batch={max_batch} fits directly")
+
+    # If no OOM boundary found, set hi = lo + 1 (nothing to refine)
+    if hi is None:
+        hi = lo + 1
+
+    # ── Phase 2: Binary search refinement between lo and hi ──
+    # lo fits, hi OOMs (or is beyond max_batch). Find true max in [lo, hi).
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if mid > max_batch:
+            hi = mid
+            continue
+        if _try_batch(mid):
+            lo = mid
+            logger.info(f"Auto batch size phase 2: {mid} fits")
+        else:
+            hi = mid
+            logger.info(f"Auto batch size phase 2: {mid} OOM")
+
+    best = lo
+
+    # ── Final: probe once more at best to report memory utilization ──
+    if torch.cuda.is_available():
+        _try_batch(best)
+        util, used_mb, total_mb = _get_gpu_utilization()
+        logger.info(
+            f"Auto batch size result: {best}  "
+            f"(GPU mem: {used_mb}MB / {total_mb}MB = {util:.1%})"
+        )
+    else:
+        logger.info(f"Auto batch size result: {best}")
+
     return best
 
 
@@ -105,6 +179,55 @@ def _cleanup_gpu():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def sync_batch_size_across_ranks(local_batch_size: int) -> int:
+    """Take the minimum batch size across all DDP ranks.
+
+    In multi-GPU setups, different GPUs may have different available memory
+    (mixed GPU types, other processes occupying VRAM, etc.).  Each rank probes
+    independently, then we synchronize to the **minimum** so that every rank
+    can handle the chosen batch size without OOM.
+
+    If ``torch.distributed`` is not initialized or WORLD_SIZE <= 1, returns
+    *local_batch_size* unchanged.
+    """
+    import os
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return local_batch_size
+
+    import torch.distributed as dist
+
+    # Initialize process group if not already done (accelerate launch sets
+    # the env vars but may not have called init_process_group yet).
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        _did_init = True
+    else:
+        _did_init = False
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    tensor = torch.tensor([local_batch_size], dtype=torch.long, device=device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+    global_min = tensor.item()
+
+    if global_min != local_batch_size:
+        logger.warning(
+            f"Rank {local_rank}: local max batch={local_batch_size}, "
+            f"global min={global_min} (constrained by weakest GPU)"
+        )
+    else:
+        logger.info(
+            f"Rank {local_rank}: batch size {local_batch_size} "
+            f"consistent across all ranks"
+        )
+
+    # Don't destroy the process group — Accelerator will reuse it
+    return global_min
 
 
 def compute_gradient_accumulation(

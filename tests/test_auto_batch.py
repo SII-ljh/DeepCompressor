@@ -1,7 +1,9 @@
 """Tests for auto_batch.py."""
 
+import os
 import warnings
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -11,6 +13,7 @@ from deep_compressor.auto_batch import (
     build_sample_batch_fn_qa,
     compute_gradient_accumulation,
     find_max_batch_size,
+    sync_batch_size_across_ranks,
 )
 
 
@@ -127,8 +130,31 @@ class TestFindMaxBatchSize:
             assert result == 4
             assert len(w) == 1
 
+    def test_binary_search_finds_exact_max(self):
+        """Binary search refines beyond power-of-2 to find true max."""
+        model = torch.nn.Linear(10, 10)
+        fake_device = SimpleNamespace(type="cuda")
+
+        # OOM at >20, so true max is 20
+        def build_fn(bs):
+            return {"x": torch.randn(bs, 10)}
+
+        def forward_fn(m, batch):
+            if batch["x"].shape[0] > 20:
+                raise RuntimeError(
+                    "CUDA out of memory. Tried to allocate 2.00 GiB")
+            return m(batch["x"]).sum()
+
+        result = find_max_batch_size(
+            model, build_fn, forward_fn, fake_device,
+            max_batch=64, min_batch=1, mixed_precision="no",
+        )
+        # Phase 1: 64 OOM, 32 OOM, 16 fits -> lo=16, hi=32
+        # Phase 2: binary search 16..32 -> finds 20
+        assert result == 20
+
     def test_halving_on_oom(self):
-        """Simulate OOM for large batches, success for small ones."""
+        """Simulate OOM for large batches, binary search finds exact boundary."""
         model = torch.nn.Linear(10, 10)
         fake_device = SimpleNamespace(type="cuda")
 
@@ -184,7 +210,7 @@ class TestFindMaxBatchSize:
             )
 
     def test_max_batch_not_power_of_two(self):
-        """max_batch=50 should start probing at 32."""
+        """max_batch=50: phase 1 finds 32, then tries 50 and succeeds."""
         model = torch.nn.Linear(10, 10)
         fake_device = SimpleNamespace(type="cuda")
         tried_sizes = []
@@ -200,6 +226,62 @@ class TestFindMaxBatchSize:
             model, build_fn, forward_fn, fake_device,
             max_batch=50, min_batch=1, mixed_precision="no",
         )
-        # Should try 32 first (highest power of 2 <= 50) and succeed
+        # Phase 1 starts at 32, succeeds. Then tries max_batch=50, succeeds.
         assert tried_sizes[0] == 32
-        assert result == 32
+        assert result == 50
+
+    def test_binary_search_respects_max_batch(self):
+        """Binary search should not exceed max_batch even if memory allows."""
+        model = torch.nn.Linear(10, 10)
+        fake_device = SimpleNamespace(type="cuda")
+
+        def build_fn(bs):
+            return {"x": torch.randn(bs, 10)}
+
+        # Everything fits — but max_batch caps at 40
+        def forward_fn(m, batch):
+            return m(batch["x"]).sum()
+
+        result = find_max_batch_size(
+            model, build_fn, forward_fn, fake_device,
+            max_batch=40, min_batch=1, mixed_precision="no",
+        )
+        assert result == 40
+
+    def test_binary_search_between_powers(self):
+        """OOM at >24 with max_batch=64 should find exactly 24."""
+        model = torch.nn.Linear(10, 10)
+        fake_device = SimpleNamespace(type="cuda")
+
+        def build_fn(bs):
+            return {"x": torch.randn(bs, 10)}
+
+        def forward_fn(m, batch):
+            if batch["x"].shape[0] > 24:
+                raise RuntimeError("CUDA out of memory.")
+            return m(batch["x"]).sum()
+
+        result = find_max_batch_size(
+            model, build_fn, forward_fn, fake_device,
+            max_batch=64, min_batch=1, mixed_precision="no",
+        )
+        # Phase 1: 64 OOM, 32 OOM, 16 fits -> lo=16, hi=32
+        # Phase 2: 24 fits, 28 OOM, 26 OOM, 25 OOM -> lo=24
+        assert result == 24
+
+
+# ── sync_batch_size_across_ranks ─────────────────────────────────────
+
+
+class TestSyncBatchSizeAcrossRanks:
+    def test_single_gpu_passthrough(self):
+        """WORLD_SIZE=1 (or unset) returns local value unchanged."""
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "1"}):
+            assert sync_batch_size_across_ranks(16) == 16
+
+    def test_no_world_size_passthrough(self):
+        """No WORLD_SIZE env var returns local value unchanged."""
+        env = os.environ.copy()
+        env.pop("WORLD_SIZE", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            assert sync_batch_size_across_ranks(32) == 32
