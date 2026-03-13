@@ -149,28 +149,24 @@ def clear_cache():
 
 # ========== Conversion functions ==========
 
-def _convert_squad(dataset, max_n: int = 0, source: str = "squad",
-                   include_unanswerable: bool = False):
-    """Convert SQuAD-format dataset (also works for AdversarialQA, MLQA, XQuAD)."""
+def _convert_squad(dataset, max_n: int = 0, source: str = "squad"):
+    """Convert SQuAD-format dataset (also works for AdversarialQA, MLQA, XQuAD).
+
+    Unanswerable samples (empty answer list) are kept with answer="No answer".
+    """
     samples = []
     for row in dataset:
         if max_n and len(samples) >= max_n:
             break
         answers = row.get("answers", {}).get("text", [])
         if not answers:
-            if include_unanswerable:
-                samples.append({
-                    "context": row["context"],
-                    "question": row["question"],
-                    "answer": "无法回答" if "chinese" in source.lower() else "No answer",
-                    "source": source,
-                    "unanswerable": True,
-                })
-            continue
+            answer = "无法回答" if "chinese" in source.lower() else "No answer"
+        else:
+            answer = answers[0]
         samples.append({
             "context": row["context"],
             "question": row["question"],
-            "answer": answers[0],
+            "answer": answer,
             "source": source,
         })
     return samples
@@ -183,12 +179,11 @@ def _convert_cmrc_or_drcd(dataset, max_n: int = 0, source: str = "cmrc"):
         if max_n and len(samples) >= max_n:
             break
         answers = row.get("answers", {}).get("text", [])
-        if not answers:
-            continue
+        answer = answers[0] if answers else "无法回答"
         samples.append({
             "context": row["context"],
             "question": row["question"],
-            "answer": answers[0],
+            "answer": answer,
             "source": source,
         })
     return samples
@@ -288,7 +283,7 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
                                source: str = "natural_questions"):
     """Convert Natural Questions dataset.
 
-    Only keeps samples with short answers (ignores long-answer-only and no-answer).
+    Keeps all samples including unanswerable ones (answer="No answer").
 
     HuggingFace NQ format (per row):
       annotations.short_answers: list of 5 annotator dicts, each with:
@@ -313,7 +308,7 @@ def _convert_natural_questions(dataset, max_n: int = 0, max_context_chars: int =
                 break
 
         if not answer:
-            continue
+            answer = "No answer"
 
         # Build context from document tokens (document.text is usually empty)
         doc_tokens_raw = row.get("document", {}).get("tokens", {})
@@ -526,18 +521,18 @@ def _convert_duorc(dataset, max_n: int = 0, source: str = "duorc"):
         if not context or not question or not answers:
             continue
 
-        # Skip no_answer samples
-        if row.get("no_answer", False):
-            continue
-
         # answers is a list of strings
         answer = answers[0]
         if isinstance(answer, dict):
             answer = answer.get("text", "")
         answer = str(answer).strip()
 
-        if not answer or answer.lower() == "no answer":
-            continue
+        if not answer:
+            # If flagged as no_answer, use explicit marker
+            if row.get("no_answer", False):
+                answer = "No answer"
+            else:
+                continue
 
         samples.append({
             "context": context,
@@ -572,8 +567,6 @@ def _convert_coqa(dataset, max_n: int = 0, source: str = "coqa"):
                 break
             if not q or not a:
                 continue
-            if a.strip().lower() in ("unknown", "no answer"):
-                continue
             samples.append({
                 "context": story,
                 "question": q,
@@ -592,19 +585,16 @@ def clean_data(samples: list, label: str = "data") -> list:
     Removes:
       1. Missing fields (context, question, answer)
       2. Very short fields (context < 50 chars, question < 2 chars)
-      3. Unanswerable samples (unanswerable=True or answer is "No answer"/"无法回答")
-      4. question == answer (exact match after normalization)
+      3. question == answer (exact match after normalization)
+
+    NOTE: Unanswerable samples are KEPT — "no answer" is a valid answer
+    the model needs to learn.
 
     Returns cleaned list.
     """
     total = len(samples)
     reasons = Counter()
     cleaned = []
-
-    no_answer_markers = {
-        "no answer", "无法回答", "unanswerable", "cannotanswer", "unknown",
-        "no_answer", "none", "n/a",
-    }
 
     for s in samples:
         ctx = (s.get("context") or "").strip()
@@ -630,15 +620,7 @@ def clean_data(samples: list, label: str = "data") -> list:
             reasons["short_question"] += 1
             continue
 
-        # 3. Unanswerable
-        if s.get("unanswerable", False):
-            reasons["unanswerable_flag"] += 1
-            continue
-        if _normalize_text(a) in no_answer_markers:
-            reasons["unanswerable_text"] += 1
-            continue
-
-        # 4. Q == A
+        # 3. Q == A
         if _normalize_text(q) == _normalize_text(a):
             reasons["q_equals_a"] += 1
             continue
@@ -647,8 +629,6 @@ def clean_data(samples: list, label: str = "data") -> list:
         s["context"] = ctx
         s["question"] = q
         s["answer"] = a
-        # Remove unanswerable key if present (keep format clean)
-        s.pop("unanswerable", None)
 
         cleaned.append(s)
 
@@ -797,12 +777,10 @@ def prepare_large_qa_data(test_mode: bool = False, only_chinese: bool = False,
                 with _Timer("SQuAD v2"):
                     print("    downloading train split ...", flush=True)
                     sq2_train = _convert_squad(load_dataset("rajpurkar/squad_v2", split="train"),
-                                               max_train, source="squad_v2",
-                                               include_unanswerable=True)
+                                               max_train, source="squad_v2")
                     print("    downloading validation split ...", flush=True)
                     sq2_dev = _convert_squad(load_dataset("rajpurkar/squad_v2", split="validation"),
-                                             max_dev, source="squad_v2",
-                                             include_unanswerable=True)
+                                             max_dev, source="squad_v2")
                     train_all.extend(sq2_train)
                     dev_all.extend(sq2_dev)
                     print(f"  OK SQuAD v2: train={len(sq2_train):,}, dev={len(sq2_dev):,}", flush=True)
