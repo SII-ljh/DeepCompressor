@@ -1,0 +1,149 @@
+
+======================================================================
+  DOWNLOADING LONG-DOCUMENT QA DATASETS
+======================================================================
+
+  ── longbench ──
+    Downloading THUDM/LongBench data.zip...
+      narrativeqa: 200
+      multifieldqa_en: 150
+      multifieldqa_zh: 200
+      hotpotqa: 200
+      2wikimqa: 200
+      musique: 200
+      qasper: 200
+      dureader: 200
+  [longbench] 1.1s
+    -> cached 1,550 samples
+  Total from longbench: 1,550
+
+  ── longbench_v2 ──
+    Loading THUDM/LongBench-v2...
+      -> 503 samples
+  [longbench_v2] 5.6s
+    -> cached 503 samples
+  Total from longbench_v2: 503
+
+  ── narrativeqa_direct ──
+    Loading deepmind/narrativeqa (train+validation)...
+      train: 32747 rows, full_text=True
+    ... narrativeqa-train: 5,000 (1s, 3820/s)
+    ... narrativeqa-train: 10,000 (3s, 3368/s)
+    ... narrativeqa-train: 15,000 (5s, 2791/s)
+    ... narrativeqa-train: 20,000 (9s, 2339/s)
+    ... narrativeqa-train: 25,000 (12s, 2054/s)
+    ... narrativeqa-train: 30,000 (17s, 1774/s)
+    ... narrativeqa-train: 32,747 total (20s)
+      train: 32747 samples extracted
+      validation: 3461 rows, full_text=True
+    ... narrativeqa-validation: 3,461 total (1s)
+      validation: 3461 samples extracted
+  [narrativeqa_direct] 26.9s
+    -> cached 36,208 samples
+  Total from narrativeqa_direct: 36,208
+
+  ── scrolls_narrativeqa ──
+    Downloading tau/scrolls narrative_qa.zip (train)...
+      train: 55003 rows loaded
+      train: 55003 samples
+    Downloading tau/scrolls narrative_qa.zip (validation)...
+      validation: 5878 rows loaded
+      validation: 5878 samples
+  [scrolls_narrativeqa] 204.0s
+    -> cached 60,881 samples
+  Total from scrolls_narrativeqa: 60,881
+
+  ── quality_direct ──
+    Loading emozilla/quality...
+      Fields: ['article', 'question', 'options', 'answer', 'hard']
+      -> 2523 samples
+  [quality_direct] 3.2s
+    -> cached 2,523 samples
+  Total from quality_direct: 2,523
+
+  ── scrolls_quality ──
+    Downloading tau/scrolls quality.zip (train)...
+      train: 2523 rows
+      train: 2523 samples
+    Downloading tau/scrolls quality.zip (validation)...
+      validation: 2086 rows
+      validation: 2086 samples
+  [scrolls_quality] 1.2s
+    -> cached 4,609 samples
+  Total from scrolls_quality: 4,609
+
+  ── scrolls_qasper ──
+    Downloading tau/scrolls qasper.zip (train)...
+      train: 2567 rows
+      train: 2567 samples
+    Downloading tau/scrolls qasper.zip (validation)...
+      validation: 1726 rows
+      validation: 1726 samples
+  [scrolls_qasper] 1.0s
+    -> cached 4,293 samples
+  Total from scrolls_qasper: 4,293
+
+  ── leval ──
+    Downloading L-Eval/financial_qa...
+      -> 68 samples
+    Downloading L-Eval/legal_contract_qa...
+      -> 154 samples
+    Downloading L-Eval/scientific_qa...
+      -> 184 samples
+    Downloading L-Eval/multidoc_qa...
+      -> 158 samples
+    Downloading L-Eval/natural_question...
+      -> 109 samples
+    Downloading L-Eval/narrative_qa...
+      -> 214 samples
+    Downloading L-Eval/meeting_qa...
+      SKIP meeting_qa: 404 Client Error. (Request ID: Root=1-69b439aa-4f38b78e77d4eab163795735;025b8be0-1460-444b-af16-6f54e320cfd1)
+
+Entry Not Found for url: https://huggingface.co/datasets/L4NLP/LEval/resolve/main/LEval/Generation/meeting_qa.jsonl.
+    Downloading L-Eval/review_qa...
+      SKIP review_qa: 404 Client Error. (Request ID: Root=1-69b439ab-27bac17827c814e350a1bebd;f83fbe3b-cc64-4ee1-b55b-893e8c25afb7)
+
+Entry Not Found for url: https://huggingface.co/datasets/L4NLP/LEval/resolve/main/LEval/Generation/review_qa.jsonl.
+    Downloading L-Eval/news_qa...
+      SKIP news_qa: 404 Client Error. (Request ID: Root=1-69b439ab-29a707a5527bc6306186fea6;8ff4b94e-3e16-4cf9-aaaa-b9b1789b9ba2)
+
+Entry Not Found for url: https://huggingface.co/datasets/L4NLP/LEval/resolve/main/LEval/Generation/news_qa.jsonl.
+    Downloading L-Eval/paper_assistant...
+      -> 69 samples
+    Downloading L-Eval/patent_qa...
+      SKIP patent_qa: 404 Client Error. (Request ID: Root=1-69b439ab-01bc658879f2390e2e3dbd7b;1a2b77f6-5c4c-4a6f-b5aa-6268621ccd6d)
+
+Entry Not Found for url: https://huggingface.co/datasets/L4NLP/LEval/resolve/main/LEval/Generation/patent_qa.jsonl.
+    Downloading L-Eval/tv_show_qa...
+      SKIP tv_show_qa: 404 Client Error. (Request ID: Root=1-69b439ac-1d85e08678731d825d6b8973;ab15e8e1-b290-47fd-8eda-5da916d71611)
+
+Entry Not Found for url: https://huggingface.co/datasets/L4NLP/LEval/resolve/main/LEval/Generation/tv_show_qa.jsonl.
+  [leval] 3.0s
+    -> cached 956 samples
+  Total from leval: 956
+
+  Raw total: 111,523 samples
+
+======================================================================
+  CLEANING
+======================================================================
+
+  [data] Cleaning: 111,523 -> 111,523 (0 removed)
+  Dedup: 111,523 -> 84,250 (27,273 removed)
+
+======================================================================
+  TOKEN FILTERING [4,096 – 65,536]  truncate=ON
+======================================================================
+    Computing token lengths (18 workers, 84,250 samples)...
+Token indices sequence length is longer than the specified maximum sequence length for this model (270483 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (283952 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (289437 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (500972 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (151063 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (347032 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (241794 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (296452 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (187369 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (292239 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (161679 > 131072). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (457629 > 131072). Running this sequence through the model will result in indexing errors
