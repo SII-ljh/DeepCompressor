@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import gc
 import logging
 import math
 import os
@@ -249,48 +250,64 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
         if tcfg.epochs > 0 and accelerator.is_main_process:
             logger.info(f"Epoch {current_epoch}/{tcfg.epochs}")
         for batch in train_loader:
-            with accelerator.accumulate(model):
-                fwd_kwargs = _build_forward_kwargs(batch, completed_steps)
+            try:
+                with accelerator.accumulate(model):
+                    fwd_kwargs = _build_forward_kwargs(batch, completed_steps)
 
-                # On-the-fly teacher distillation
-                # Teacher sees full document + question + answer (uncompressed)
-                # and we extract only the Q+A tail for distillation targets.
-                if teacher_model is not None:
-                    with torch.no_grad():
-                        t_input_ids = torch.cat([
-                            batch["doc_input_ids"],
-                            batch["q_input_ids"],
-                            batch["answer_ids"],
-                        ], dim=1)
-                        t_attention_mask = torch.cat([
-                            batch["doc_attention_mask"],
-                            batch["q_attention_mask"],
-                            batch["answer_attention_mask"],
-                        ], dim=1)
-                        t_out = teacher_model(
-                            input_ids=t_input_ids,
-                            attention_mask=t_attention_mask,
-                            output_hidden_states=True, use_cache=False,
-                        )
-                        # Slice off the document prefix — keep only Q+A region
-                        doc_len = batch["doc_input_ids"].shape[1]
-                        fwd_kwargs["teacher_logits"] = \
-                            t_out.logits[:, doc_len:, :].detach()
-                        fwd_kwargs["teacher_hidden"] = [
-                            h[:, doc_len:, :].detach()
-                            for h in t_out.hidden_states]
+                    # On-the-fly teacher distillation
+                    # Teacher sees full document + question + answer (uncompressed)
+                    # and we extract only the Q+A tail for distillation targets.
+                    if teacher_model is not None:
+                        with torch.no_grad():
+                            t_input_ids = torch.cat([
+                                batch["doc_input_ids"],
+                                batch["q_input_ids"],
+                                batch["answer_ids"],
+                            ], dim=1)
+                            t_attention_mask = torch.cat([
+                                batch["doc_attention_mask"],
+                                batch["q_attention_mask"],
+                                batch["answer_attention_mask"],
+                            ], dim=1)
+                            t_out = teacher_model(
+                                input_ids=t_input_ids,
+                                attention_mask=t_attention_mask,
+                                output_hidden_states=True, use_cache=False,
+                            )
+                            # Slice off the document prefix — keep only Q+A region
+                            doc_len = batch["doc_input_ids"].shape[1]
+                            fwd_kwargs["teacher_logits"] = \
+                                t_out.logits[:, doc_len:, :].detach()
+                            fwd_kwargs["teacher_hidden"] = [
+                                h[:, doc_len:, :].detach()
+                                for h in t_out.hidden_states]
 
-                losses = model(**fwd_kwargs)
+                    losses = model(**fwd_kwargs)
 
-                accelerator.backward(losses["total"])
+                    accelerator.backward(losses["total"])
 
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(
-                        model.parameters(), tcfg.max_grad_norm)
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(
+                            model.parameters(), tcfg.max_grad_norm)
 
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    # Aggressive auto batch may hit OOM on unusually long batches
+                    logger.warning(
+                        f"Step {completed_steps}: OOM on batch "
+                        f"(doc={batch['doc_input_ids'].shape}, "
+                        f"q={batch['q_input_ids'].shape}, "
+                        f"ans={batch['answer_ids'].shape}), skipping")
+                    model.zero_grad(set_to_none=True)
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
+                raise
 
             running_loss += losses["total"].detach().item()
             micro_steps += 1
@@ -506,7 +523,8 @@ def _run_training(config: DeepCompressorConfig,
         model.to(probe_device)
 
         build_fn = build_sample_batch_fn_qa(
-            config, config.qwen.vocab_size, probe_device)
+            config, config.qwen.vocab_size, probe_device,
+            seq_length_ratio=0.75)
 
         def _probe_forward(m, batch):
             losses = m(**batch, global_step=0)

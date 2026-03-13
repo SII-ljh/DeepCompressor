@@ -51,7 +51,7 @@ EPOCHS="${EPOCHS:-3}"
 Q_VALUE=512
 DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
-MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
+MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-1000}"
 
 # ── Data check ───────────────────────────────────────────────────────────────
 if [ "$DRY_RUN" = false ]; then

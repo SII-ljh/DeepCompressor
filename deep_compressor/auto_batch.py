@@ -22,16 +22,17 @@ def _is_oom(e: Exception) -> bool:
     return False
 
 
-def _get_gpu_utilization() -> tuple[float, int, int]:
-    """Return (utilization_ratio, used_MB, total_MB) for current CUDA device."""
+def _get_peak_gpu_utilization() -> tuple[float, int, int]:
+    """Return (utilization_ratio, peak_MB, total_MB) for current CUDA device.
+
+    Uses ``max_memory_allocated`` to capture peak usage during forward+backward,
+    not the post-cleanup residual.
+    """
     if not torch.cuda.is_available():
         return 0.0, 0, 0
-    allocated = torch.cuda.memory_allocated()
-    reserved = torch.cuda.memory_reserved()
+    peak = torch.cuda.max_memory_allocated()
     total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
-    # Use max(allocated, reserved) as the effective usage
-    used = max(allocated, reserved)
-    return used / total, used // (1 << 20), total // (1 << 20)
+    return peak / total, peak // (1 << 20), total // (1 << 20)
 
 
 def find_max_batch_size(
@@ -160,13 +161,14 @@ def find_max_batch_size(
 
     best = lo
 
-    # ── Final: probe once more at best to report memory utilization ──
+    # ── Final: probe once more at best to report peak memory utilization ──
     if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
         _try_batch(best)
-        util, used_mb, total_mb = _get_gpu_utilization()
+        util, peak_mb, total_mb = _get_peak_gpu_utilization()
         logger.info(
             f"Auto batch size result: {best}  "
-            f"(GPU mem: {used_mb}MB / {total_mb}MB = {util:.1%})"
+            f"(GPU peak mem: {peak_mb}MB / {total_mb}MB = {util:.1%})"
         )
     else:
         logger.info(f"Auto batch size result: {best}")
@@ -245,15 +247,26 @@ def compute_gradient_accumulation(
     return max(1, math.ceil(target / per_step))
 
 
-def build_sample_batch_fn_qa(config, vocab_size: int, device: torch.device):
+def build_sample_batch_fn_qa(
+    config,
+    vocab_size: int,
+    device: torch.device,
+    seq_length_ratio: float = 1.0,
+):
     """Return a closure that builds synthetic QA batches for memory probing.
 
-    Uses worst-case (max) sequence lengths from *config* for conservative
-    estimation.
+    Args:
+        config: DeepCompressorConfig with qwen.max_doc/question/answer_tokens.
+        vocab_size: Vocabulary size.
+        device: Device to place tensors on.
+        seq_length_ratio: Fraction of max sequence lengths to use for probing
+            (default 1.0 = worst-case).  Real data with dynamic padding
+            typically averages 0.6-0.8 of max lengths, so setting this to
+            ~0.75 produces a more realistic (and aggressive) estimate.
     """
-    max_doc = config.qwen.max_doc_tokens
-    max_q = config.qwen.max_question_tokens
-    max_a = config.qwen.max_answer_tokens
+    max_doc = max(1, int(config.qwen.max_doc_tokens * seq_length_ratio))
+    max_q = max(1, int(config.qwen.max_question_tokens * seq_length_ratio))
+    max_a = max(1, int(config.qwen.max_answer_tokens * seq_length_ratio))
 
     def _build(batch_size: int) -> dict:
         return {

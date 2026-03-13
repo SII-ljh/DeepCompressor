@@ -38,7 +38,7 @@ TARGET_EBS="${TARGET_EBS:-256}"
 EPOCHS="${EPOCHS:-3}"
 DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
-MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
+MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-1000}"
 
 # Supported Q values (for validation)
 SUPPORTED_Q="64 128 256 512 1024 2048"
