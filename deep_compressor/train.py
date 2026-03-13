@@ -201,6 +201,166 @@ def _build_forward_kwargs(batch, completed_steps: int):
     return kwargs
 
 
+def _split_batch(batch: dict, chunks: int) -> list:
+    """Split a batch dict along dim=0 into *chunks* sub-batches."""
+    bs = next(iter(batch.values())).shape[0]
+    indices = [range(i, min(i + (bs + chunks - 1) // chunks, bs))
+               for i in range(0, bs, (bs + chunks - 1) // chunks)]
+    sub_batches = []
+    for idx in indices:
+        idx = list(idx)
+        if len(idx) == 0:
+            continue
+        sub = {k: v[idx] for k, v in batch.items()}
+        sub_batches.append(sub)
+    return sub_batches
+
+
+def _run_batch_with_oom_retry(
+    batch, model, teacher_model, accelerator, optimizer,
+    scheduler, tcfg, completed_steps, build_fwd_fn,
+    _max_splits: int = 3,
+):
+    """Run a training step, splitting the batch on OOM instead of skipping.
+
+    On OOM, the batch is split into 2x smaller sub-batches and retried.
+    Gradients are accumulated across sub-batches so all data participates
+    in training.  Up to *_max_splits* halvings (batch/2, batch/4, batch/8).
+
+    Returns:
+        dict of averaged loss components, or None if all retries failed.
+    """
+    bs = next(iter(batch.values())).shape[0]
+
+    def _forward_one(sub_batch, num_sub_batches: int):
+        """Forward + backward on one (sub-)batch, scaling loss."""
+        fwd_kwargs = build_fwd_fn(sub_batch, completed_steps)
+
+        if teacher_model is not None:
+            with torch.no_grad():
+                t_input_ids = torch.cat([
+                    sub_batch["doc_input_ids"],
+                    sub_batch["q_input_ids"],
+                    sub_batch["answer_ids"],
+                ], dim=1)
+                t_attention_mask = torch.cat([
+                    sub_batch["doc_attention_mask"],
+                    sub_batch["q_attention_mask"],
+                    sub_batch["answer_attention_mask"],
+                ], dim=1)
+                t_out = teacher_model(
+                    input_ids=t_input_ids,
+                    attention_mask=t_attention_mask,
+                    output_hidden_states=True, use_cache=False,
+                )
+                doc_len = sub_batch["doc_input_ids"].shape[1]
+                fwd_kwargs["teacher_logits"] = \
+                    t_out.logits[:, doc_len:, :].detach()
+                fwd_kwargs["teacher_hidden"] = [
+                    h[:, doc_len:, :].detach()
+                    for h in t_out.hidden_states]
+
+        losses = model(**fwd_kwargs)
+
+        # Scale loss by 1/num_sub_batches so gradient accumulation across
+        # sub-batches equals the original full-batch gradient.
+        scaled_loss = losses["total"] / num_sub_batches
+        accelerator.backward(scaled_loss)
+
+        return {k: (v.detach().item() if torch.is_tensor(v) else v)
+                for k, v in losses.items()}
+
+    # Try full batch first, split on OOM
+    num_chunks = 1
+    for attempt in range(_max_splits + 1):
+        try:
+            if num_chunks == 1:
+                # Full batch — normal path with accelerator.accumulate
+                with accelerator.accumulate(model):
+                    fwd_kwargs = build_fwd_fn(batch, completed_steps)
+
+                    if teacher_model is not None:
+                        with torch.no_grad():
+                            t_input_ids = torch.cat([
+                                batch["doc_input_ids"],
+                                batch["q_input_ids"],
+                                batch["answer_ids"],
+                            ], dim=1)
+                            t_attention_mask = torch.cat([
+                                batch["doc_attention_mask"],
+                                batch["q_attention_mask"],
+                                batch["answer_attention_mask"],
+                            ], dim=1)
+                            t_out = teacher_model(
+                                input_ids=t_input_ids,
+                                attention_mask=t_attention_mask,
+                                output_hidden_states=True, use_cache=False,
+                            )
+                            doc_len = batch["doc_input_ids"].shape[1]
+                            fwd_kwargs["teacher_logits"] = \
+                                t_out.logits[:, doc_len:, :].detach()
+                            fwd_kwargs["teacher_hidden"] = [
+                                h[:, doc_len:, :].detach()
+                                for h in t_out.hidden_states]
+
+                    losses = model(**fwd_kwargs)
+                    accelerator.backward(losses["total"])
+
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(
+                            model.parameters(), tcfg.max_grad_norm)
+
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+
+                return {k: (v.detach().item() if torch.is_tensor(v) else v)
+                        for k, v in losses.items()}
+            else:
+                # Split path — manual gradient accumulation across sub-batches
+                sub_batches = _split_batch(batch, num_chunks)
+                all_losses = []
+                for sub in sub_batches:
+                    sub_losses = _forward_one(sub, len(sub_batches))
+                    all_losses.append(sub_losses)
+
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(
+                        model.parameters(), tcfg.max_grad_norm)
+
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+                # Average loss components across sub-batches
+                avg = {}
+                for k in all_losses[0]:
+                    avg[k] = sum(sl[k] for sl in all_losses) / len(all_losses)
+                return avg
+
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            # OOM — clean up and retry with more splits
+            model.zero_grad(set_to_none=True)
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            num_chunks *= 2
+            if attempt < _max_splits:
+                logger.warning(
+                    f"Step {completed_steps}: OOM on batch (bs={bs}, "
+                    f"doc={batch['doc_input_ids'].shape[1]}), "
+                    f"retrying with {num_chunks} sub-batches")
+            else:
+                logger.error(
+                    f"Step {completed_steps}: OOM persists after "
+                    f"{_max_splits} splits (bs=1), skipping batch")
+                return None
+
+    return None
+
+
 # ── unified training loop ──────────────────────────────────────────────
 def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
                 train_loader: DataLoader, accelerator: Accelerator,
@@ -250,74 +410,23 @@ def train_stage(config: DeepCompressorConfig, model: DeepCompressor,
         if tcfg.epochs > 0 and accelerator.is_main_process:
             logger.info(f"Epoch {current_epoch}/{tcfg.epochs}")
         for batch in train_loader:
-            try:
-                with accelerator.accumulate(model):
-                    fwd_kwargs = _build_forward_kwargs(batch, completed_steps)
+            # _run_batch_with_oom_retry processes the batch, splitting on OOM
+            batch_losses = _run_batch_with_oom_retry(
+                batch, model, teacher_model, accelerator, optimizer,
+                scheduler, tcfg, completed_steps, _build_forward_kwargs,
+            )
+            if batch_losses is None:
+                # All sub-batch retries failed — extremely rare
+                continue
 
-                    # On-the-fly teacher distillation
-                    # Teacher sees full document + question + answer (uncompressed)
-                    # and we extract only the Q+A tail for distillation targets.
-                    if teacher_model is not None:
-                        with torch.no_grad():
-                            t_input_ids = torch.cat([
-                                batch["doc_input_ids"],
-                                batch["q_input_ids"],
-                                batch["answer_ids"],
-                            ], dim=1)
-                            t_attention_mask = torch.cat([
-                                batch["doc_attention_mask"],
-                                batch["q_attention_mask"],
-                                batch["answer_attention_mask"],
-                            ], dim=1)
-                            t_out = teacher_model(
-                                input_ids=t_input_ids,
-                                attention_mask=t_attention_mask,
-                                output_hidden_states=True, use_cache=False,
-                            )
-                            # Slice off the document prefix — keep only Q+A region
-                            doc_len = batch["doc_input_ids"].shape[1]
-                            fwd_kwargs["teacher_logits"] = \
-                                t_out.logits[:, doc_len:, :].detach()
-                            fwd_kwargs["teacher_hidden"] = [
-                                h[:, doc_len:, :].detach()
-                                for h in t_out.hidden_states]
-
-                    losses = model(**fwd_kwargs)
-
-                    accelerator.backward(losses["total"])
-
-                    if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(
-                            model.parameters(), tcfg.max_grad_norm)
-
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    # Aggressive auto batch may hit OOM on unusually long batches
-                    logger.warning(
-                        f"Step {completed_steps}: OOM on batch "
-                        f"(doc={batch['doc_input_ids'].shape}, "
-                        f"q={batch['q_input_ids'].shape}, "
-                        f"ans={batch['answer_ids'].shape}), skipping")
-                    model.zero_grad(set_to_none=True)
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    continue
-                raise
-
-            running_loss += losses["total"].detach().item()
+            running_loss += batch_losses["total"]
             micro_steps += 1
 
             # accumulate loss components
-            for k, v in losses.items():
+            for k, v in batch_losses.items():
                 if k == "total":
                     continue
-                val = v.detach().item() if torch.is_tensor(v) else v
-                running_components[k] = running_components.get(k, 0.0) + val
+                running_components[k] = running_components.get(k, 0.0) + v
 
             if accelerator.sync_gradients:
                 completed_steps += 1
@@ -503,9 +612,8 @@ def _run_training(config: DeepCompressorConfig,
 
     # ── auto batch size detection (before Accelerator) ──
     if tcfg.auto_batch_size:
-        import gc
-
         from deep_compressor.auto_batch import (
+            build_probe_fn_from_dataset,
             build_sample_batch_fn_qa,
             compute_gradient_accumulation,
             find_max_batch_size,
@@ -522,9 +630,28 @@ def _run_training(config: DeepCompressorConfig,
 
         model.to(probe_device)
 
-        build_fn = build_sample_batch_fn_qa(
-            config, config.qwen.vocab_size, probe_device,
-            seq_length_ratio=0.75)
+        # Build probe batches from real data (P95 lengths) when possible,
+        # fall back to synthetic worst-case otherwise.
+        _probe_dataset = None
+        try:
+            _probe_dataset = QADataset(
+                data_path, tokenizer,
+                max_doc_tokens=config.qwen.max_doc_tokens,
+                max_question_tokens=config.qwen.max_question_tokens,
+                max_answer_tokens=config.qwen.max_answer_tokens)
+        except Exception as e:
+            logger.warning(f"Could not load dataset for probe: {e}")
+
+        if _probe_dataset is not None and len(_probe_dataset) > 0:
+            _collator = PaddingCollator(pad_token_id=tokenizer.pad_token_id)
+            build_fn, data_stats = build_probe_fn_from_dataset(
+                _probe_dataset, _collator, probe_device,
+                percentile=95.0, num_stat_samples=500)
+            del _probe_dataset, _collator
+        else:
+            logger.warning("Falling back to synthetic worst-case probe")
+            build_fn = build_sample_batch_fn_qa(
+                config, config.qwen.vocab_size, probe_device)
 
         def _probe_forward(m, batch):
             losses = m(**batch, global_step=0)

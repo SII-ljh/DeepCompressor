@@ -289,6 +289,104 @@ def build_sample_batch_fn_qa(
     return _build
 
 
+def build_probe_fn_from_dataset(dataset, collator, device: torch.device,
+                                percentile: float = 95.0,
+                                num_stat_samples: int = 500):
+    """Build a probe function using real data length statistics.
+
+    Samples *num_stat_samples* from *dataset*, computes the P-*percentile*
+    lengths for doc/question/answer, and uses those as the probe sequence
+    lengths.  This is much more accurate than synthetic worst-case probes.
+
+    Args:
+        dataset: QADataset (must support ``len`` and ``__getitem__``).
+        collator: PaddingCollator.
+        device: Target device.
+        percentile: Percentile of sequence lengths to use (default 95).
+            P95 means the probe batch is longer than 95% of real batches.
+        num_stat_samples: Number of samples to scan for statistics.
+
+    Returns:
+        (build_fn, stats_dict) where build_fn is suitable for
+        ``find_max_batch_size`` and stats_dict has the computed lengths.
+    """
+    import numpy as np
+    from torch.utils.data import DataLoader, Subset
+
+    n = min(num_stat_samples, len(dataset))
+    # Random sample indices
+    indices = np.random.default_rng(42).choice(len(dataset), size=n, replace=False)
+    subset = Subset(dataset, indices.tolist())
+    tmp_loader = DataLoader(subset, batch_size=1, shuffle=False, collate_fn=collator)
+
+    doc_lens, q_lens, a_lens = [], [], []
+    for batch in tmp_loader:
+        # With dynamic padding, batch size=1 means length = actual token count
+        doc_lens.append(batch["doc_input_ids"].shape[1])
+        q_lens.append(batch["q_input_ids"].shape[1])
+        a_lens.append(batch["answer_ids"].shape[1])
+
+    p_doc = int(np.percentile(doc_lens, percentile))
+    p_q = int(np.percentile(q_lens, percentile))
+    p_a = int(np.percentile(a_lens, percentile))
+
+    stats = {
+        "doc_p50": int(np.median(doc_lens)),
+        "doc_p95": int(np.percentile(doc_lens, 95)),
+        "doc_max": max(doc_lens),
+        "q_p50": int(np.median(q_lens)),
+        "q_p95": int(np.percentile(q_lens, 95)),
+        "a_p50": int(np.median(a_lens)),
+        "a_p95": int(np.percentile(a_lens, 95)),
+        "probe_doc": p_doc,
+        "probe_q": p_q,
+        "probe_a": p_a,
+        "percentile": percentile,
+        "num_samples": n,
+    }
+
+    logger.info(
+        f"Data length stats (n={n}): "
+        f"doc P50={stats['doc_p50']} P95={stats['doc_p95']} max={stats['doc_max']} | "
+        f"q P50={stats['q_p50']} P95={stats['q_p95']} | "
+        f"ans P50={stats['a_p50']} P95={stats['a_p95']}"
+    )
+    logger.info(
+        f"Probe lengths (P{percentile:.0f}): "
+        f"doc={p_doc}, q={p_q}, ans={p_a}"
+    )
+
+    vocab_size = max(
+        max(batch["doc_input_ids"].max().item(),
+            batch["q_input_ids"].max().item(),
+            batch["answer_ids"].max().item())
+        for batch in DataLoader(subset, batch_size=1, shuffle=False,
+                                collate_fn=collator)
+    ) + 1
+
+    def _build(batch_size: int) -> dict:
+        return {
+            "doc_input_ids": torch.randint(
+                0, vocab_size, (batch_size, p_doc), device=device),
+            "doc_attention_mask": torch.ones(
+                batch_size, p_doc, dtype=torch.long, device=device),
+            "q_input_ids": torch.randint(
+                0, vocab_size, (batch_size, p_q), device=device),
+            "q_attention_mask": torch.ones(
+                batch_size, p_q, dtype=torch.long, device=device),
+            "answer_ids": torch.randint(
+                0, vocab_size, (batch_size, p_a), device=device),
+            "answer_attention_mask": torch.ones(
+                batch_size, p_a, dtype=torch.long, device=device),
+            "answer_labels": torch.randint(
+                0, vocab_size, (batch_size, p_a), device=device),
+        }
+
+    return _build, stats
+
+    return _build
+
+
 def build_sample_batch_fn_lora(
     max_seq_len: int,
     vocab_size: int,
