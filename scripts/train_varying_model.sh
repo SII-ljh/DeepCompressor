@@ -1,12 +1,18 @@
 #!/bin/bash
-# Unified training script for varying Qwen model sizes (replaces 4 individual scripts + orchestrator).
-# All models use Q=512.
+# Unified training script for varying Qwen model sizes. All models use Q=512.
+# Uses auto batch size detection — no manual batch/accum tuning needed.
 #
 # Usage:
 #   bash scripts/train_varying_model.sh                # run all models (0.6b 1.7b 4b 8b)
 #   bash scripts/train_varying_model.sh 0.6b 4b        # run only specified models
 #   bash scripts/train_varying_model.sh --dry-run 0.6b  # print command without executing
 #   bash scripts/train_varying_model.sh --dry-run        # dry-run all models
+#
+# Environment variables:
+#   NGPUS=4                     # number of GPUs (default: 8)
+#   TARGET_EBS=128              # target effective batch size (default: 256)
+#   EPOCHS=3                    # epoch-based training (default: 0 = use max_steps from config)
+#   MAX_EVAL_SAMPLES=1000       # limit eval samples (default: 5000)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -26,25 +32,26 @@ if [ ${#MODELS[@]} -eq 0 ]; then
     MODELS=(0.6b 1.7b 4b 8b)
 fi
 
-# ── Hyperparameter lookup table ──────────────────────────────────────────────
-#   model -> display_name  hidden  layers  batch  grad_accum  lr  grad_ckpt
-get_hparams() {
+# ── Model display names ─────────────────────────────────────────────────────
+get_display_name() {
     local model=$1
     case $model in
-        0.6b) NAME="Qwen3-0.6B"; HIDDEN=1024; LAYERS=28; BATCH=16; ACCUM=2; LR=1e-4; CKPT=false ;;
-        1.7b) NAME="Qwen3-1.7B"; HIDDEN=2048; LAYERS=28; BATCH=12; ACCUM=2; LR=1e-4; CKPT=false ;;
-        4b)   NAME="Qwen3-4B";   HIDDEN=2560; LAYERS=36; BATCH=8;  ACCUM=4; LR=5e-5; CKPT=true  ;;
-        8b)   NAME="Qwen3-8B";   HIDDEN=4096; LAYERS=36; BATCH=4;  ACCUM=8; LR=5e-5; CKPT=true  ;;
+        0.6b) NAME="Qwen3-0.6B" ;;
+        1.7b) NAME="Qwen3-1.7B" ;;
+        4b)   NAME="Qwen3-4B"   ;;
+        8b)   NAME="Qwen3-8B"   ;;
         *)    echo "Unknown model: $model (supported: 0.6b 1.7b 4b 8b)"; return 1 ;;
     esac
 }
 
 # ── Common settings ──────────────────────────────────────────────────────────
-NUM_GPUS=8
+NUM_GPUS="${NGPUS:-8}"
+TARGET_EBS="${TARGET_EBS:-256}"
+EPOCHS="${EPOCHS:-0}"
 Q_VALUE=512
-DATA_PATH="data/qa_large_train.json"
-EVAL_DATA_PATH="data/qa_large_dev.json"
-MAX_EVAL_SAMPLES=5000
+DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
+EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
+MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
 
 # ── Data check ───────────────────────────────────────────────────────────────
 if [ "$DRY_RUN" = false ]; then
@@ -65,29 +72,29 @@ SUCCEEDED=0
 
 echo ""
 echo "======================================================================"
-echo "  Deep Compressor — Multi-Model QA Training (Q=$Q_VALUE, 8 GPUs)"
+echo "  Deep Compressor — Multi-Model QA Training (Q=$Q_VALUE, ${NUM_GPUS} GPUs, auto batch)"
 echo "======================================================================"
-echo "  Models:  ${MODELS[*]}"
-echo "  Q value: $Q_VALUE (fixed)"
-echo "  Dry run: $DRY_RUN"
-echo "  Start:   $(date)"
+echo "  Models:     ${MODELS[*]}"
+echo "  Q value:    $Q_VALUE (fixed)"
+echo "  Target EBS: $TARGET_EBS"
+echo "  Epochs:     ${EPOCHS:-max_steps from config}"
+echo "  Dry run:    $DRY_RUN"
+echo "  Start:      $(date)"
 echo "======================================================================"
 echo ""
 
 for MODEL in "${MODELS[@]}"; do
-    if ! get_hparams "$MODEL"; then
+    if ! get_display_name "$MODEL"; then
         RESULTS[$MODEL]="SKIPPED (unknown model)"
         ((FAILED++))
         continue
     fi
 
-    # Config file naming: qa_qwen0.6b_q512_8gpu.yaml, qa_qwen4b_q512_8gpu.yaml, etc.
     CONFIG="configs/qa_qwen${MODEL}_q${Q_VALUE}_8gpu.yaml"
     OUTPUT_DIR="outputs/qa_qwen${MODEL}_q${Q_VALUE}_8gpu"
-    EFF_BATCH=$((NUM_GPUS * BATCH * ACCUM))
 
     echo "----------------------------------------------------------------------"
-    echo "[$NAME] hidden=$HIDDEN layers=$LAYERS | batch=$BATCH accum=$ACCUM eff=$EFF_BATCH lr=$LR | grad_ckpt=$CKPT"
+    echo "[$NAME] auto batch | target_ebs=${TARGET_EBS} | Q=$Q_VALUE"
     echo "----------------------------------------------------------------------"
 
     if [ "$DRY_RUN" = false ] && [ ! -f "$CONFIG" ]; then
@@ -106,7 +113,14 @@ for MODEL in "${MODELS[@]}"; do
     --data_path $DATA_PATH \
     --eval_data_path $EVAL_DATA_PATH \
     --max_eval_samples $MAX_EVAL_SAMPLES \
+    --auto_batch_size \
+    --target_effective_batch_size $TARGET_EBS \
     --wandb --wandb_project deep-compressor --wandb_offline"
+
+    # Add epochs if specified
+    if [ "$EPOCHS" -gt 0 ] 2>/dev/null; then
+        CMD="$CMD --epochs $EPOCHS"
+    fi
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute:"
@@ -121,6 +135,7 @@ for MODEL in "${MODELS[@]}"; do
 
     mkdir -p "$OUTPUT_DIR"
     export WANDB_MODE=offline
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     START_SEC=$SECONDS
     set +e
@@ -152,7 +167,7 @@ echo "======================================================================"
 printf "  %-14s %-12s %-30s\n" "Model" "Duration" "Status"
 echo "----------------------------------------------------------------------"
 for MODEL in "${MODELS[@]}"; do
-    get_hparams "$MODEL" 2>/dev/null
+    get_display_name "$MODEL" 2>/dev/null
     printf "  %-14s %-12s %-30s\n" "${NAME:-$MODEL}" "${DURATIONS[$MODEL]:---}" "${RESULTS[$MODEL]}"
 done
 echo "----------------------------------------------------------------------"

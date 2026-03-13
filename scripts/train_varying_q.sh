@@ -1,11 +1,18 @@
 #!/bin/bash
-# Unified training script for varying Q values (replaces 6 individual scripts + orchestrator).
+# Unified training script for varying Q values.
+# Uses auto batch size detection — no manual batch/accum tuning needed.
 #
 # Usage:
 #   bash scripts/train_varying_q.sh                    # run all Q values (64 128 256 512 1024 2048)
 #   bash scripts/train_varying_q.sh 64 256 1024        # run only specified Q values
 #   bash scripts/train_varying_q.sh --dry-run 64       # print command without executing
 #   bash scripts/train_varying_q.sh --dry-run           # dry-run all Q values
+#
+# Environment variables:
+#   NGPUS=4                     # number of GPUs (default: 8)
+#   TARGET_EBS=128              # target effective batch size (default: 256)
+#   EPOCHS=3                    # epoch-based training (default: 0 = use max_steps from config)
+#   MAX_EVAL_SAMPLES=1000       # limit eval samples (default: 5000)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -25,29 +32,16 @@ if [ ${#Q_VALUES[@]} -eq 0 ]; then
     Q_VALUES=(64 128 256 512 1024 2048)
 fi
 
-# ── Hyperparameter lookup table ──────────────────────────────────────────────
-#   Q -> batch_size  grad_accum  eval_every  save_every  grad_ckpt
-get_hparams() {
-    local q=$1
-    case $q in
-        64)   BATCH=40; ACCUM=2; EVAL=189;  SAVE=756;  CKPT=false ;;
-        128)  BATCH=30; ACCUM=2; EVAL=252;  SAVE=1008; CKPT=false ;;
-        256)  BATCH=20; ACCUM=2; EVAL=378;  SAVE=1512; CKPT=false ;;
-        512)  BATCH=16; ACCUM=2; EVAL=473;  SAVE=1890; CKPT=false ;;
-        1024) BATCH=10; ACCUM=2; EVAL=756;  SAVE=3024; CKPT=false ;;
-        2048) BATCH=5;  ACCUM=4; EVAL=756;  SAVE=3024; CKPT=true  ;;
-        *)    echo "Unknown Q value: $q (supported: 64 128 256 512 1024 2048)"; return 1 ;;
-    esac
-}
-
 # ── Common settings ──────────────────────────────────────────────────────────
-NUM_GPUS=8
-DATA_PATH="data/qa_large_train.json"
-EVAL_DATA_PATH="data/qa_large_dev.json"
-MAX_EVAL_SAMPLES=5000
-LR=1e-4
-MAX_STEPS=10000
-WARMUP_STEPS=500
+NUM_GPUS="${NGPUS:-8}"
+TARGET_EBS="${TARGET_EBS:-256}"
+EPOCHS="${EPOCHS:-0}"
+DATA_PATH="${DATA_PATH:-data/qa_large_train.json}"
+EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
+MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
+
+# Supported Q values (for validation)
+SUPPORTED_Q="64 128 256 512 1024 2048"
 
 # ── Data check ───────────────────────────────────────────────────────────────
 if [ "$DRY_RUN" = false ]; then
@@ -68,16 +62,20 @@ SUCCEEDED=0
 
 echo ""
 echo "======================================================================"
-echo "  Deep Compressor — Varying Q Training (8 GPUs)"
+echo "  Deep Compressor — Varying Q Training (${NUM_GPUS} GPUs, auto batch)"
 echo "======================================================================"
-echo "  Q values: ${Q_VALUES[*]}"
-echo "  Dry run:  $DRY_RUN"
-echo "  Start:    $(date)"
+echo "  Q values:   ${Q_VALUES[*]}"
+echo "  Target EBS: $TARGET_EBS"
+echo "  Epochs:     ${EPOCHS:-max_steps from config}"
+echo "  Dry run:    $DRY_RUN"
+echo "  Start:      $(date)"
 echo "======================================================================"
 echo ""
 
 for Q in "${Q_VALUES[@]}"; do
-    if ! get_hparams "$Q"; then
+    # Validate Q value
+    if ! echo "$SUPPORTED_Q" | grep -qw "$Q"; then
+        echo "[Q=$Q] Unknown Q value (supported: $SUPPORTED_Q) — SKIPPED"
         RESULTS[$Q]="SKIPPED (unknown Q)"
         ((FAILED++))
         continue
@@ -85,11 +83,10 @@ for Q in "${Q_VALUES[@]}"; do
 
     CONFIG="configs/qa_q${Q}_8gpu.yaml"
     OUTPUT_DIR="outputs/qa_q${Q}_8gpu"
-    EFF_BATCH=$((NUM_GPUS * BATCH * ACCUM))
     RATIO=$((4096 / Q))
 
     echo "----------------------------------------------------------------------"
-    echo "[Q=$Q] Compression ${RATIO}:1 | batch=${BATCH} accum=${ACCUM} eff=${EFF_BATCH} | grad_ckpt=${CKPT}"
+    echo "[Q=$Q] Compression ${RATIO}:1 | auto batch | target_ebs=${TARGET_EBS}"
     echo "----------------------------------------------------------------------"
 
     if [ "$DRY_RUN" = false ] && [ ! -f "$CONFIG" ]; then
@@ -108,7 +105,14 @@ for Q in "${Q_VALUES[@]}"; do
     --data_path $DATA_PATH \
     --eval_data_path $EVAL_DATA_PATH \
     --max_eval_samples $MAX_EVAL_SAMPLES \
+    --auto_batch_size \
+    --target_effective_batch_size $TARGET_EBS \
     --wandb --wandb_project deep-compressor --wandb_offline"
+
+    # Add epochs if specified
+    if [ "$EPOCHS" -gt 0 ] 2>/dev/null; then
+        CMD="$CMD --epochs $EPOCHS"
+    fi
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would execute:"
@@ -123,6 +127,7 @@ for Q in "${Q_VALUES[@]}"; do
 
     mkdir -p "$OUTPUT_DIR"
     export WANDB_MODE=offline
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     START_SEC=$SECONDS
     set +e

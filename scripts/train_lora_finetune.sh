@@ -1,5 +1,6 @@
 #!/bin/bash
 # Unified LoRA fine-tuning shell wrapper for finetune_qwen_lora.py.
+# Uses auto batch size detection — no manual batch/accum tuning needed.
 # Runs LoRA fine-tuning across different Qwen model sizes as upper-bound baselines.
 #
 # Usage:
@@ -7,6 +8,12 @@
 #   bash scripts/train_lora_finetune.sh 0.6b 4b        # fine-tune only specified models
 #   bash scripts/train_lora_finetune.sh --dry-run 0.6b  # print command without executing
 #   bash scripts/train_lora_finetune.sh --dry-run        # dry-run all models
+#
+# Environment variables:
+#   NGPUS=4                     # number of GPUs (default: 8)
+#   TARGET_EBS=128              # target effective batch size (default: 256)
+#   NUM_EPOCHS=2                # number of epochs (default: 1)
+#   MAX_EVAL_SAMPLES=1000       # limit eval samples (default: 5000)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -26,24 +33,25 @@ if [ ${#MODELS[@]} -eq 0 ]; then
     MODELS=(0.6b 1.7b 4b 8b)
 fi
 
-# ── Hyperparameter lookup table ──────────────────────────────────────────────
-#   model -> display_name  model_path  batch  grad_accum  lr  lora_r  epochs  grad_ckpt
-get_hparams() {
+# ── Model registry (only model-specific settings that can't be auto-detected) ──
+get_model_info() {
     local model=$1
     case $model in
-        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; BATCH=20; ACCUM=2;  LR=2e-4; LORA_R=16; EPOCHS=1; CKPT="" ;;
-        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; BATCH=12; ACCUM=4;  LR=2e-4; LORA_R=16; EPOCHS=1; CKPT="" ;;
-        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   BATCH=8;  ACCUM=4;  LR=1e-4; LORA_R=16; EPOCHS=1; CKPT="--gradient_checkpointing" ;;
-        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   BATCH=4;  ACCUM=8;  LR=1e-4; LORA_R=16; EPOCHS=1; CKPT="--gradient_checkpointing" ;;
+        0.6b) NAME="Qwen3-0.6B"; MODEL_PATH="models/Qwen3-0.6B"; LR=2e-4; LORA_R=16; CKPT="" ;;
+        1.7b) NAME="Qwen3-1.7B"; MODEL_PATH="models/Qwen3-1.7B"; LR=2e-4; LORA_R=16; CKPT="" ;;
+        4b)   NAME="Qwen3-4B";   MODEL_PATH="models/Qwen3-4B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing" ;;
+        8b)   NAME="Qwen3-8B";   MODEL_PATH="models/Qwen3-8B";   LR=1e-4; LORA_R=16; CKPT="--gradient_checkpointing" ;;
         *)    echo "Unknown model: $model (supported: 0.6b 1.7b 4b 8b)"; return 1 ;;
     esac
 }
 
 # ── Common settings ──────────────────────────────────────────────────────────
-NUM_GPUS=8
-TRAIN_DATA="data/qa_large_train.json"
-EVAL_DATA="data/qa_large_dev.json"
-MAX_EVAL_SAMPLES=5000
+NUM_GPUS="${NGPUS:-8}"
+TARGET_EBS="${TARGET_EBS:-256}"
+NUM_EPOCHS="${NUM_EPOCHS:-1}"
+TRAIN_DATA="${DATA_PATH:-data/qa_large_train.json}"
+EVAL_DATA="${EVAL_DATA_PATH:-data/qa_large_dev.json}"
+MAX_EVAL_SAMPLES="${MAX_EVAL_SAMPLES:-5000}"
 FINETUNE_SCRIPT="$SCRIPT_DIR/finetune_qwen_lora.py"
 
 # ── Data check ───────────────────────────────────────────────────────────────
@@ -69,26 +77,27 @@ SUCCEEDED=0
 
 echo ""
 echo "======================================================================"
-echo "  LoRA Fine-tuning — Upper-Bound Baselines (8 GPUs)"
+echo "  LoRA Fine-tuning — Upper-Bound Baselines (${NUM_GPUS} GPUs, auto batch)"
 echo "======================================================================"
-echo "  Models:  ${MODELS[*]}"
-echo "  Dry run: $DRY_RUN"
-echo "  Start:   $(date)"
+echo "  Models:     ${MODELS[*]}"
+echo "  Target EBS: $TARGET_EBS"
+echo "  Epochs:     $NUM_EPOCHS"
+echo "  Dry run:    $DRY_RUN"
+echo "  Start:      $(date)"
 echo "======================================================================"
 echo ""
 
 for MODEL in "${MODELS[@]}"; do
-    if ! get_hparams "$MODEL"; then
+    if ! get_model_info "$MODEL"; then
         RESULTS[$MODEL]="SKIPPED (unknown model)"
         ((FAILED++))
         continue
     fi
 
     OUTPUT_DIR="outputs/lora_qwen3-${MODEL}"
-    EFF_BATCH=$((NUM_GPUS * BATCH * ACCUM))
 
     echo "----------------------------------------------------------------------"
-    echo "[$NAME] batch=$BATCH accum=$ACCUM eff=$EFF_BATCH lr=$LR lora_r=$LORA_R epochs=$EPOCHS ${CKPT:+grad_ckpt}"
+    echo "[$NAME] auto batch | target_ebs=$TARGET_EBS | lr=$LR | lora_r=$LORA_R ${CKPT:+| grad_ckpt}"
     echo "----------------------------------------------------------------------"
 
     CMD="accelerate launch \
@@ -100,11 +109,11 @@ for MODEL in "${MODELS[@]}"; do
     --train_data $TRAIN_DATA \
     --eval_data $EVAL_DATA \
     --max_eval_samples $MAX_EVAL_SAMPLES \
-    --batch_size $BATCH \
-    --gradient_accumulation $ACCUM \
+    --auto_batch_size \
+    --target_effective_batch_size $TARGET_EBS \
     --learning_rate $LR \
     --lora_r $LORA_R \
-    --num_epochs $EPOCHS \
+    --num_epochs $NUM_EPOCHS \
     --output_dir $OUTPUT_DIR \
     $CKPT"
 
@@ -119,6 +128,7 @@ for MODEL in "${MODELS[@]}"; do
     fi
 
     mkdir -p "$OUTPUT_DIR"
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     START_SEC=$SECONDS
     set +e
@@ -150,7 +160,7 @@ echo "======================================================================"
 printf "  %-14s %-12s %-30s\n" "Model" "Duration" "Status"
 echo "----------------------------------------------------------------------"
 for MODEL in "${MODELS[@]}"; do
-    get_hparams "$MODEL" 2>/dev/null
+    get_model_info "$MODEL" 2>/dev/null
     printf "  %-14s %-12s %-30s\n" "${NAME:-$MODEL}" "${DURATIONS[$MODEL]:---}" "${RESULTS[$MODEL]}"
 done
 echo "----------------------------------------------------------------------"

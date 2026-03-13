@@ -707,9 +707,24 @@ def main_legacy():
                         help="Data path for diagnostic callback (defaults to --data_path)")
     parser.add_argument("--diagnostic_experiments", type=str, default="4,5",
                         help="Comma-separated mid-training experiments to run")
+    # Auto batch / epoch overrides
+    parser.add_argument("--auto_batch_size", action="store_true",
+                        help="Auto-detect max per-GPU batch size (overrides config)")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Number of epochs (overrides config; 0=use max_steps)")
+    parser.add_argument("--target_effective_batch_size", type=int, default=None,
+                        help="Target effective batch size for auto grad_accum (default: 256)")
     args = parser.parse_args()
 
     config = DeepCompressorConfig.from_yaml(args.config)
+
+    # CLI overrides for training config
+    if args.auto_batch_size:
+        config.training.auto_batch_size = True
+    if args.epochs is not None:
+        config.training.epochs = args.epochs
+    if args.target_effective_batch_size is not None:
+        config.training.target_effective_batch_size = args.target_effective_batch_size
 
     # Build wandb config from CLI flags (auto-generates name/tags if not set)
     wandb_conf = build_wandb_conf(args)
