@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -141,6 +142,25 @@ class _StreamingCacheWriter:
 
     def __enter__(self): return self
     def __exit__(self, *a): self.close()
+
+
+def _cache_count(name):
+    """Count samples in cache without loading all into memory."""
+    jsonl_path = CACHE_DIR / f"{name}.jsonl"
+    json_path = CACHE_DIR / f"{name}.json"
+    path = jsonl_path if jsonl_path.exists() else json_path
+    if not path.exists():
+        return 0
+    if path.suffix == ".jsonl":
+        count = 0
+        with open(path, "r") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+        return count
+    else:
+        with open(path, "r") as f:
+            return len(json.load(f))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -277,10 +297,17 @@ def download_longbench_v2(max_n=0, max_context_chars=260000):
     return samples
 
 
-def download_narrativeqa_direct(max_n=0, max_context_chars=260000):
-    """NarrativeQA from deepmind — streaming mode, truncate long stories."""
+def download_narrativeqa_direct(max_n=0, max_context_chars=260000, cache_name=None):
+    """NarrativeQA from deepmind — streaming mode, truncate long stories.
+
+    If cache_name is provided, writes directly to cache (constant memory)
+    and returns None. Otherwise returns a list of samples.
+    """
     from datasets import load_dataset
-    samples = []
+
+    writer = _StreamingCacheWriter(cache_name) if cache_name else None
+    samples = [] if writer is None else None
+    total_count = 0
     try:
         print("    Loading deepmind/narrativeqa (streaming)...", flush=True)
         for split in ["train", "validation"]:
@@ -318,26 +345,44 @@ def download_narrativeqa_direct(max_n=0, max_context_chars=260000):
                 if not answer or not question:
                     continue
 
-                samples.append({
+                sample = {
                     "context": text,
                     "question": question,
                     "answer": answer,
                     "source": f"narrativeqa_{split}",
-                })
+                }
+                if writer:
+                    writer.write(sample)
+                else:
+                    samples.append(sample)
+
                 count += 1
                 if max_n and count >= max_n:
                     break
+            total_count += count
             print(f"      {split}: {count} samples", flush=True)
     except Exception as e:
         print(f"      FAILED: {e}", flush=True)
         traceback.print_exc()
+
+    if writer:
+        writer.close()
+        print(f"  Total from narrativeqa_direct: {total_count:,}", flush=True)
+        return None
     return samples
 
 
-def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000):
-    """NarrativeQA via SCROLLS zip — stream line-by-line, never load all into memory."""
-    samples = []
+def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=None):
+    """NarrativeQA via SCROLLS zip — stream line-by-line, write directly to cache.
+
+    If cache_name is provided, writes directly to cache (constant memory)
+    and returns None. Otherwise returns a list of samples.
+    """
     zip_path = _hf_download("tau/scrolls", "narrative_qa.zip")
+
+    writer = _StreamingCacheWriter(cache_name) if cache_name else None
+    samples = [] if writer is None else None
+    total_count = 0
 
     for split in ["train", "validation"]:
         try:
@@ -355,6 +400,7 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000):
 
                         inp = row.get("input", "")
                         output = row.get("output", "")
+                        del row  # free parsed JSON immediately
                         if not inp or not output:
                             continue
 
@@ -364,12 +410,16 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000):
                             question = parts[0].strip()
                             context = parts[1].strip()
                         else:
-                            lines = inp.split("\n", 1)
-                            if len(lines) == 2:
-                                question = lines[0].strip()
-                                context = lines[1].strip()
+                            lines_split = inp.split("\n", 1)
+                            if len(lines_split) == 2:
+                                question = lines_split[0].strip()
+                                context = lines_split[1].strip()
                             else:
+                                del inp
                                 continue
+
+                        # Free the large input string immediately
+                        del inp
 
                         if not context or not question or len(context) < 200:
                             continue
@@ -378,22 +428,30 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000):
                         if len(context) > max_context_chars:
                             context = context[:max_context_chars]
 
-                        # Free the large input string immediately
-                        del inp
-
-                        samples.append({
+                        sample = {
                             "context": context,
                             "question": question,
                             "answer": output.strip(),
                             "source": f"scrolls_narrativeqa_{split}",
-                        })
+                        }
+                        if writer:
+                            writer.write(sample)
+                        else:
+                            samples.append(sample)
+
                         count += 1
                         if max_n and count >= max_n:
                             break
+            total_count += count
             print(f"      {split}: {count} samples", flush=True)
         except Exception as e:
             print(f"      FAILED ({split}): {e}", flush=True)
             traceback.print_exc()
+
+    if writer:
+        writer.close()
+        print(f"  Total from scrolls_narrativeqa: {total_count:,}", flush=True)
+        return None
     return samples
 
 
@@ -736,11 +794,15 @@ def print_length_stats(samples, lengths, label="data"):
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
 
-# Functions that accept max_context_chars
-_DATASETS_WITH_TRUNCATE = {
-    "longbench_v2":        download_longbench_v2,
+# Large datasets: stream directly to cache (constant memory during download)
+_STREAMING_DATASETS = {
     "narrativeqa_direct":  download_narrativeqa_direct,
     "scrolls_narrativeqa": download_scrolls_narrativeqa,
+}
+
+# Functions that accept max_context_chars (non-streaming)
+_DATASETS_WITH_TRUNCATE = {
+    "longbench_v2":        download_longbench_v2,
 }
 
 # Functions that don't need it (contexts already reasonable)
@@ -774,7 +836,7 @@ def main():
                         help="Truncate context during download (chars, default: 260000 ≈ 64K tokens)")
     parser.add_argument("--model", default="models/Qwen3-0.6B",
                         help="Tokenizer path (default: models/Qwen3-0.6B)")
-    parser.add_argument("--num_workers", type=int, default=18)
+    parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--dev_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--test", action="store_true",
@@ -800,7 +862,7 @@ def main():
     print("  DOWNLOADING LONG-DOCUMENT QA DATASETS")
     print("=" * 70)
 
-    all_samples = []
+    downloaded_names = []
     skip = set(args.skip)
     only = set(args.only) if args.only else None
     mcc = args.max_context_chars
@@ -813,27 +875,47 @@ def main():
 
         print(f"\n  ── {name} ──", flush=True)
         if not getattr(args, 'no_cache', False) and _cache_exists(name):
-            cached = _cache_load(name)
-            all_samples.extend(cached)
-            print(f"  CACHED: {len(cached):,} samples", flush=True)
+            count = _cache_count(name)
+            print(f"  CACHED: {count:,} samples", flush=True)
+            downloaded_names.append(name)
             continue
 
         with _Timer(name):
             try:
-                if name in _DATASETS_WITH_TRUNCATE:
+                if name in _STREAMING_DATASETS:
+                    # Large datasets: stream directly to cache (constant memory)
+                    fn = _STREAMING_DATASETS[name]
+                    fn(max_n=max_n, max_context_chars=mcc, cache_name=name)
+                elif name in _DATASETS_WITH_TRUNCATE:
                     samples = _DATASETS_WITH_TRUNCATE[name](max_n=max_n, max_context_chars=mcc)
+                    if samples:
+                        _cache_save(name, samples)
+                    print(f"  Total from {name}: {len(samples):,}", flush=True)
+                    del samples
                 else:
                     samples = _DATASETS_PLAIN[name](max_n=max_n)
+                    if samples:
+                        _cache_save(name, samples)
+                    print(f"  Total from {name}: {len(samples):,}", flush=True)
+                    del samples
             except Exception as e:
                 print(f"  ERROR: {e}", flush=True)
                 traceback.print_exc()
-                samples = []
+                continue
 
-        if samples:
-            _cache_save(name, samples)
-        all_samples.extend(samples)
-        print(f"  Total from {name}: {len(samples):,}", flush=True)
+        if _cache_exists(name):
+            downloaded_names.append(name)
+        gc.collect()
 
+    # Load all from cache (single copy in memory)
+    print(f"\n  Loading all cached datasets...", flush=True)
+    all_samples = []
+    for name in downloaded_names:
+        loaded = _cache_load(name)
+        all_samples.extend(loaded)
+        print(f"    {name}: {len(loaded):,}", flush=True)
+        del loaded
+    gc.collect()
     print(f"\n  Raw total: {len(all_samples):,} samples")
 
     # ── Clean ──
