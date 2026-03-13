@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Analyze token length distribution of QA datasets.
+"""Analyze token length distribution of QA/NTP datasets.
 
-Uses multiprocessing to tokenize in parallel across all available CPU cores
-(or across multiple GPUs for the per-GPU memory estimation).
+Uses multiprocessing to tokenize in parallel across all available CPU cores.
+By default, discovers and analyzes ALL .json and .jsonl files in data/.
 
 Usage:
-    # Basic — analyze the training set
-    python scripts/analyze_data_lengths.py --data data/qa_large_train.json
+    # Default — analyze ALL data files in data/ directory
+    python scripts/analyze_data_lengths.py
 
-    # Full — training + eval, with per-GPU batch size recommendation
+    # Specific files only
+    python scripts/analyze_data_lengths.py --data data/qa_large_train.json data/qa_large_dev.json
+
+    # Custom data directory
+    python scripts/analyze_data_lengths.py --data_dir data/ablation
+
+    # Fast — only sample 10k entries per file (for very large datasets)
+    python scripts/analyze_data_lengths.py --sample 10000
+
+    # Custom tokenizer and limits
     python scripts/analyze_data_lengths.py \
-        --data data/qa_large_train.json \
-        --eval_data data/qa_large_dev.json \
         --model models/Qwen3-0.6B \
         --max_doc 4096 --max_q 256 --max_a 512
-
-    # Fast — only sample 10k entries (for very large datasets)
-    python scripts/analyze_data_lengths.py \
-        --data data/qa_large_train.json --sample 10000
-
-    # 8-GPU parallel tokenization (splits data across workers)
-    python scripts/analyze_data_lengths.py \
-        --data data/qa_large_train.json --num_workers 8
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -40,7 +40,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ── Tokenization worker (runs in subprocess) ─────────────────────────
 
-def _tokenize_chunk(items, tokenizer_path, max_doc, max_q, max_a):
+def _detect_format(items):
+    """Detect data format: 'qa' (context/question/answer) or 'ntp' (text)."""
+    sample = items[0] if items else {}
+    if "context" in sample and "question" in sample:
+        return "qa"
+    elif "text" in sample:
+        return "ntp"
+    else:
+        return "unknown"
+
+
+def _tokenize_chunk(items, tokenizer_path, max_doc, max_q, max_a, data_format):
     """Tokenize a chunk of items. Runs in a worker process."""
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -49,17 +60,25 @@ def _tokenize_chunk(items, tokenizer_path, max_doc, max_q, max_a):
     q_lens = []
     a_lens = []
 
-    for item in items:
-        doc = tokenizer(item["context"], truncation=True, max_length=max_doc,
-                        return_tensors=None, padding=False)
-        q = tokenizer(item["question"], truncation=True, max_length=max_q,
-                      return_tensors=None, padding=False)
-        a = tokenizer(item["answer"], truncation=True, max_length=max_a - 1,
-                      return_tensors=None, padding=False)
+    if data_format == "qa":
+        for item in items:
+            doc = tokenizer(item["context"], truncation=True, max_length=max_doc,
+                            return_tensors=None, padding=False)
+            q = tokenizer(item["question"], truncation=True, max_length=max_q,
+                          return_tensors=None, padding=False)
+            a = tokenizer(item["answer"], truncation=True, max_length=max_a - 1,
+                          return_tensors=None, padding=False)
 
-        doc_lens.append(len(doc["input_ids"]))
-        q_lens.append(len(q["input_ids"]))
-        a_lens.append(len(a["input_ids"]) + 1)  # +1 for EOS
+            doc_lens.append(len(doc["input_ids"]))
+            q_lens.append(len(q["input_ids"]))
+            a_lens.append(len(a["input_ids"]) + 1)  # +1 for EOS
+    elif data_format == "ntp":
+        for item in items:
+            doc = tokenizer(item["text"], truncation=True, max_length=max_doc,
+                            return_tensors=None, padding=False)
+            doc_lens.append(len(doc["input_ids"]))
+    else:
+        raise ValueError(f"Unknown data format. Keys: {list(items[0].keys()) if items else '(empty)'}")
 
     return doc_lens, q_lens, a_lens
 
@@ -146,9 +165,26 @@ def analyze_dataset(data_path, tokenizer_path, max_doc, max_q, max_a,
     print(f"{'=' * 70}")
 
     t0 = time.time()
-    with open(data_path) as f:
-        data = json.load(f)
+    if data_path.endswith(".jsonl"):
+        data = []
+        with open(data_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    data.append(json.loads(line))
+    else:
+        with open(data_path) as f:
+            data = json.load(f)
     print(f"  Loaded {len(data):,} samples in {time.time() - t0:.1f}s")
+
+    # Detect data format
+    data_format = _detect_format(data)
+    print(f"  Format: {data_format}")
+
+    if data_format == "unknown":
+        keys = list(data[0].keys()) if data else []
+        print(f"  ⚠  Skipping — unrecognized format (keys: {keys})")
+        return None
 
     if sample_size and sample_size < len(data):
         rng = np.random.default_rng(42)
@@ -168,12 +204,13 @@ def analyze_dataset(data_path, tokenizer_path, max_doc, max_q, max_a,
 
     if effective_workers <= 1:
         # Single-process — avoid subprocess overhead
-        doc, q, a = _tokenize_chunk(data, tokenizer_path, max_doc, max_q, max_a)
+        doc, q, a = _tokenize_chunk(data, tokenizer_path, max_doc, max_q, max_a, data_format)
         all_doc, all_q, all_a = doc, q, a
     else:
         worker_fn = partial(_tokenize_chunk,
                             tokenizer_path=tokenizer_path,
-                            max_doc=max_doc, max_q=max_q, max_a=max_a)
+                            max_doc=max_doc, max_q=max_q, max_a=max_a,
+                            data_format=data_format)
         with ProcessPoolExecutor(max_workers=effective_workers) as pool:
             futures = {pool.submit(worker_fn, chunk): i
                        for i, chunk in enumerate(chunks)}
@@ -188,38 +225,58 @@ def analyze_dataset(data_path, tokenizer_path, max_doc, max_q, max_a,
     print(f"  Tokenized {len(data):,} samples in {elapsed:.1f}s ({rate:,.0f} samples/s)")
 
     # Statistics
-    doc_stats = _analyze_field("doc (context)", all_doc, max_doc)
-    q_stats = _analyze_field("question", all_q, max_q)
-    a_stats = _analyze_field("answer", all_a, max_a)
+    result = {"path": data_path, "n_samples": len(data), "format": data_format}
 
-    # Total sequence length per sample
-    totals = np.array(all_doc) + np.array(all_q) + np.array(all_a)
-    max_total = max_doc + max_q + max_a
-    total_stats = _analyze_field("total (doc+q+a)", totals.tolist(), max_total)
+    doc_stats = _analyze_field("doc (context/text)", all_doc, max_doc)
+    result["doc"] = doc_stats
+    _print_histogram("doc (context/text)", all_doc, max_doc)
 
-    # Histograms
-    _print_histogram("doc (context)", all_doc, max_doc)
-    _print_histogram("question", all_q, max_q)
-    _print_histogram("answer", all_a, max_a)
+    if data_format == "qa":
+        q_stats = _analyze_field("question", all_q, max_q)
+        a_stats = _analyze_field("answer", all_a, max_a)
+        result["question"] = q_stats
+        result["answer"] = a_stats
 
-    # Recommendations
-    _print_batch_recommendation(doc_stats, q_stats, a_stats)
+        # Total sequence length per sample
+        totals = np.array(all_doc) + np.array(all_q) + np.array(all_a)
+        max_total = max_doc + max_q + max_a
+        total_stats = _analyze_field("total (doc+q+a)", totals.tolist(), max_total)
+        result["total"] = total_stats
 
-    return {
-        "path": data_path,
-        "n_samples": len(data),
-        "doc": doc_stats, "question": q_stats, "answer": a_stats,
-        "total": total_stats,
-    }
+        _print_histogram("question", all_q, max_q)
+        _print_histogram("answer", all_a, max_a)
+
+        # Recommendations
+        _print_batch_recommendation(doc_stats, q_stats, a_stats)
+
+    return result
+
+
+def _discover_data_files(data_dir, recursive=True):
+    """Discover all .json and .jsonl files in a directory."""
+    patterns = ["*.json", "*.jsonl"]
+    files = []
+    for pat in patterns:
+        if recursive:
+            files.extend(glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
+        else:
+            files.extend(glob.glob(os.path.join(data_dir, pat)))
+    # Sort for deterministic order: by directory depth first, then alphabetically
+    files = sorted(set(files))
+    return files
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze token length distribution of QA datasets")
-    parser.add_argument("--data", default="data/qa_large_train.json",
-                        help="Path to training data (default: data/qa_large_train.json)")
-    parser.add_argument("--eval_data", default="data/qa_large_dev.json",
-                        help="Path to eval data (default: data/qa_large_dev.json)")
+        description="Analyze token length distribution of QA/NTP datasets. "
+                    "By default discovers and analyzes ALL .json/.jsonl files in data/.")
+    parser.add_argument("--data", nargs="*", default=None,
+                        help="Specific data file(s) to analyze. "
+                             "If omitted, auto-discovers all files in --data_dir.")
+    parser.add_argument("--data_dir", default="data",
+                        help="Directory to search for data files (default: data)")
+    parser.add_argument("--no_recursive", action="store_true",
+                        help="Don't search subdirectories")
     parser.add_argument("--model", default="models/Qwen3-0.6B",
                         help="Tokenizer model path (default: models/Qwen3-0.6B)")
     parser.add_argument("--max_doc", type=int, default=4096,
@@ -228,36 +285,62 @@ def main():
                         help="Max question tokens (default: 256)")
     parser.add_argument("--max_a", type=int, default=512,
                         help="Max answer tokens (default: 512)")
-    parser.add_argument("--num_workers", type=int, default=20,
-                        help="Parallel workers for tokenization (default: 20)")
+    parser.add_argument("--num_workers", type=int, default=18,
+                        help="Parallel workers for tokenization (default: 18, tuned for 20-core CPU)")
     parser.add_argument("--sample", type=int, default=0,
-                        help="Random sample size (0=all, default: 0)")
+                        help="Random sample size per file (0=all, default: 0)")
     parser.add_argument("--output", default="results/data_length_stats.json",
                         help="Save results to JSON file (default: results/data_length_stats.json)")
     args = parser.parse_args()
 
+    # Determine files to analyze
+    if args.data:
+        files = args.data
+    else:
+        if not os.path.isdir(args.data_dir):
+            print(f"  Error: data directory '{args.data_dir}' not found.")
+            sys.exit(1)
+        files = _discover_data_files(args.data_dir, recursive=not args.no_recursive)
+        if not files:
+            print(f"  No .json or .jsonl files found in '{args.data_dir}'.")
+            sys.exit(1)
+
+    print(f"  Found {len(files)} data file(s) to analyze:")
+    for f in files:
+        size_mb = os.path.getsize(f) / (1024 * 1024)
+        print(f"    - {f}  ({size_mb:.1f} MB)")
+    print()
+
     results = {}
-
-    results["train"] = analyze_dataset(
-        args.data, args.model,
-        args.max_doc, args.max_q, args.max_a,
-        args.num_workers, args.sample or None,
-        label="(train)",
-    )
-
-    if args.eval_data:
-        results["eval"] = analyze_dataset(
-            args.eval_data, args.model,
+    for filepath in files:
+        name = os.path.relpath(filepath, start=args.data_dir if not args.data else ".")
+        r = analyze_dataset(
+            filepath, args.model,
             args.max_doc, args.max_q, args.max_a,
             args.num_workers, args.sample or None,
-            label="(eval)",
+            label=f"({name})",
         )
+        if r is not None:
+            results[name] = r
 
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"\n  Results saved to {args.output}")
+
+    # Summary table
+    print("\n" + "=" * 90)
+    print("  SUMMARY")
+    print("=" * 90)
+    print(f"  {'File':<45} {'Format':<6} {'Samples':>10} {'Doc P50':>8} {'Doc P95':>8} {'Doc Max':>8}")
+    print(f"  {'─' * 85}")
+    for name, r in results.items():
+        fmt = r.get("format", "?")
+        n = r["n_samples"]
+        doc = r["doc"]
+        print(f"  {name:<45} {fmt:<6} {n:>10,} {doc['p50']:>8,} {doc['p95']:>8,} {doc['max']:>8,}")
+    print("=" * 90)
 
     print("\n" + "=" * 70)
     print("  DONE")
