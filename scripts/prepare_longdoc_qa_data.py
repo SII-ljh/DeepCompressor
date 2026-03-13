@@ -89,21 +89,58 @@ def _iter_progress(iterable, desc="Processing", every=5000):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Cache
+#  Cache  (JSONL format — streaming-friendly, no full-memory load)
 # ═══════════════════════════════════════════════════════════════════════
 
-def _cache_path(name): return CACHE_DIR / f"{name}.json"
-def _cache_exists(name): return _cache_path(name).exists()
+def _cache_path(name): return CACHE_DIR / f"{name}.jsonl"
+
+def _cache_exists(name):
+    # Also check legacy .json for backward compat
+    return _cache_path(name).exists() or (CACHE_DIR / f"{name}.json").exists()
 
 def _cache_save(name, samples):
+    """Save list of samples as JSONL (one JSON object per line)."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(_cache_path(name), "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False)
+        for s in samples:
+            f.write(json.dumps(s, ensure_ascii=False) + "\n")
     print(f"    -> cached {len(samples):,} samples", flush=True)
 
 def _cache_load(name):
-    with open(_cache_path(name), "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load cache, supports both JSONL (new) and JSON (legacy)."""
+    jsonl_path = CACHE_DIR / f"{name}.jsonl"
+    json_path = CACHE_DIR / f"{name}.json"
+    path = jsonl_path if jsonl_path.exists() else json_path
+    samples = []
+    with open(path, "r", encoding="utf-8") as f:
+        if path.suffix == ".jsonl":
+            for line in f:
+                line = line.strip()
+                if line:
+                    samples.append(json.loads(line))
+        else:
+            samples = json.load(f)
+    return samples
+
+
+class _StreamingCacheWriter:
+    """Write samples to JSONL cache one-at-a-time (constant memory)."""
+    def __init__(self, name):
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.path = _cache_path(name)
+        self.f = open(self.path, "w", encoding="utf-8")
+        self.count = 0
+
+    def write(self, sample):
+        self.f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        self.count += 1
+
+    def close(self):
+        self.f.close()
+        print(f"    -> cached {self.count:,} samples (streaming)", flush=True)
+
+    def __enter__(self): return self
+    def __exit__(self, *a): self.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -198,13 +235,13 @@ def download_longbench(max_n=0):
     return all_samples
 
 
-def download_longbench_v2(max_n=0):
+def download_longbench_v2(max_n=0, max_context_chars=260000):
     """LongBench v2: 503 MC questions with 8K-2M word contexts."""
     from datasets import load_dataset
     samples = []
     try:
-        print("    Loading THUDM/LongBench-v2...", flush=True)
-        ds = load_dataset("THUDM/LongBench-v2", split="train")
+        print("    Loading THUDM/LongBench-v2 (streaming)...", flush=True)
+        ds = load_dataset("THUDM/LongBench-v2", split="train", streaming=True)
         count = 0
         for row in ds:
             context = row.get("context", "")
@@ -213,7 +250,9 @@ def download_longbench_v2(max_n=0):
             if not context or not question:
                 continue
 
-            # Convert letter to answer text
+            if len(context) > max_context_chars:
+                context = context[:max_context_chars]
+
             answer = answer_letter
             if answer_letter in ("A", "B", "C", "D"):
                 key = f"choice_{answer_letter}"
@@ -238,27 +277,21 @@ def download_longbench_v2(max_n=0):
     return samples
 
 
-def download_narrativeqa_direct(max_n=0):
-    """NarrativeQA from deepmind — full story texts (very long, ~200K tokens)."""
+def download_narrativeqa_direct(max_n=0, max_context_chars=260000):
+    """NarrativeQA from deepmind — streaming mode, truncate long stories."""
     from datasets import load_dataset
     samples = []
     try:
-        print("    Loading deepmind/narrativeqa (train+validation)...", flush=True)
+        print("    Loading deepmind/narrativeqa (streaming)...", flush=True)
         for split in ["train", "validation"]:
-            ds = load_dataset("deepmind/narrativeqa", split=split, token=HF_TOKEN)
-
-            # Check first row for full text
-            if len(ds) > 0:
-                doc0 = ds[0].get("document", {})
-                has_text = bool(doc0.get("text", "").strip())
-                print(f"      {split}: {len(ds)} rows, full_text={has_text}", flush=True)
+            ds = load_dataset("deepmind/narrativeqa", split=split,
+                              token=HF_TOKEN, streaming=True)
 
             count = 0
             for row in _iter_progress(ds, desc=f"narrativeqa-{split}"):
                 doc = row.get("document", {})
                 text = doc.get("text", "").strip()
                 if not text:
-                    # Fallback to summary
                     summary = doc.get("summary", "")
                     if isinstance(summary, dict):
                         text = summary.get("text", "").strip()
@@ -266,6 +299,10 @@ def download_narrativeqa_direct(max_n=0):
                         text = summary.strip()
                 if not text:
                     continue
+
+                # Truncate to cap memory
+                if len(text) > max_context_chars:
+                    text = text[:max_context_chars]
 
                 q = row.get("question", {})
                 question = q.get("text", "").strip() if isinstance(q, dict) else str(q).strip()
@@ -290,58 +327,69 @@ def download_narrativeqa_direct(max_n=0):
                 count += 1
                 if max_n and count >= max_n:
                     break
-            print(f"      {split}: {count} samples extracted", flush=True)
+            print(f"      {split}: {count} samples", flush=True)
     except Exception as e:
         print(f"      FAILED: {e}", flush=True)
         traceback.print_exc()
     return samples
 
 
-def download_scrolls_narrativeqa(max_n=0):
-    """NarrativeQA via SCROLLS zip — question first, then document in 'input'."""
+def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000):
+    """NarrativeQA via SCROLLS zip — stream line-by-line, never load all into memory."""
     samples = []
+    zip_path = _hf_download("tau/scrolls", "narrative_qa.zip")
+
     for split in ["train", "validation"]:
         try:
             inner = f"narrative_qa/{split}.jsonl"
-            print(f"    Downloading tau/scrolls narrative_qa.zip ({split})...", flush=True)
-            rows = _hf_download_zip_and_read_jsonl("tau/scrolls", "narrative_qa.zip", inner)
-            print(f"      {split}: {len(rows)} rows loaded", flush=True)
+            print(f"    Streaming tau/scrolls narrative_qa/{split}...", flush=True)
 
             count = 0
-            for row in rows:
-                inp = row.get("input", "")
-                output = row.get("output", "")
-                if not inp or not output:
-                    continue
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                with zf.open(inner) as f:
+                    for line_bytes in _iter_progress(f, desc=f"scrolls-nqa-{split}"):
+                        line = line_bytes.decode("utf-8").strip()
+                        if not line:
+                            continue
+                        row = json.loads(line)
 
-                # SCROLLS format: question comes first, then document
-                # Try to separate by looking for the story start
-                # The question is typically a single sentence at the beginning
-                parts = inp.split("\n\n", 1)
-                if len(parts) == 2 and len(parts[0]) < 500:
-                    question = parts[0].strip()
-                    context = parts[1].strip()
-                else:
-                    # Fallback: first line is question
-                    lines = inp.split("\n", 1)
-                    if len(lines) == 2:
-                        question = lines[0].strip()
-                        context = lines[1].strip()
-                    else:
-                        continue
+                        inp = row.get("input", "")
+                        output = row.get("output", "")
+                        if not inp or not output:
+                            continue
 
-                if not context or not question or len(context) < 200:
-                    continue
+                        # SCROLLS: question first, then document
+                        parts = inp.split("\n\n", 1)
+                        if len(parts) == 2 and len(parts[0]) < 500:
+                            question = parts[0].strip()
+                            context = parts[1].strip()
+                        else:
+                            lines = inp.split("\n", 1)
+                            if len(lines) == 2:
+                                question = lines[0].strip()
+                                context = lines[1].strip()
+                            else:
+                                continue
 
-                samples.append({
-                    "context": context,
-                    "question": question,
-                    "answer": output.strip(),
-                    "source": f"scrolls_narrativeqa_{split}",
-                })
-                count += 1
-                if max_n and count >= max_n:
-                    break
+                        if not context or not question or len(context) < 200:
+                            continue
+
+                        # Truncate to cap memory
+                        if len(context) > max_context_chars:
+                            context = context[:max_context_chars]
+
+                        # Free the large input string immediately
+                        del inp
+
+                        samples.append({
+                            "context": context,
+                            "question": question,
+                            "answer": output.strip(),
+                            "source": f"scrolls_narrativeqa_{split}",
+                        })
+                        count += 1
+                        if max_n and count >= max_n:
+                            break
             print(f"      {split}: {count} samples", flush=True)
         except Exception as e:
             print(f"      FAILED ({split}): {e}", flush=True)
@@ -688,16 +736,27 @@ def print_length_stats(samples, lengths, label="data"):
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
 
-DATASETS = {
-    "longbench":              download_longbench,
-    "longbench_v2":           download_longbench_v2,
-    "narrativeqa_direct":     download_narrativeqa_direct,
-    "scrolls_narrativeqa":    download_scrolls_narrativeqa,
-    "quality_direct":         download_quality_direct,
-    "scrolls_quality":        download_scrolls_quality,
-    "scrolls_qasper":         download_scrolls_qasper,
-    "leval":                  download_leval,
+# Functions that accept max_context_chars
+_DATASETS_WITH_TRUNCATE = {
+    "longbench_v2":        download_longbench_v2,
+    "narrativeqa_direct":  download_narrativeqa_direct,
+    "scrolls_narrativeqa": download_scrolls_narrativeqa,
 }
+
+# Functions that don't need it (contexts already reasonable)
+_DATASETS_PLAIN = {
+    "longbench":       download_longbench,
+    "quality_direct":  download_quality_direct,
+    "scrolls_quality": download_scrolls_quality,
+    "scrolls_qasper":  download_scrolls_qasper,
+    "leval":           download_leval,
+}
+
+# Ordered download list
+DATASET_NAMES = [
+    "longbench", "longbench_v2", "narrativeqa_direct", "scrolls_narrativeqa",
+    "quality_direct", "scrolls_quality", "scrolls_qasper", "leval",
+]
 
 
 def main():
@@ -711,6 +770,8 @@ def main():
                         help="Truncate docs > max_tokens instead of dropping (default: True)")
     parser.add_argument("--no_truncate", action="store_true",
                         help="Drop docs > max_tokens instead of truncating")
+    parser.add_argument("--max_context_chars", type=int, default=260000,
+                        help="Truncate context during download (chars, default: 260000 ≈ 64K tokens)")
     parser.add_argument("--model", default="models/Qwen3-0.6B",
                         help="Tokenizer path (default: models/Qwen3-0.6B)")
     parser.add_argument("--num_workers", type=int, default=18)
@@ -742,8 +803,9 @@ def main():
     all_samples = []
     skip = set(args.skip)
     only = set(args.only) if args.only else None
+    mcc = args.max_context_chars
 
-    for name, fn in DATASETS.items():
+    for name in DATASET_NAMES:
         if name in skip:
             print(f"\n  SKIP: {name}", flush=True); continue
         if only and name not in only:
@@ -758,7 +820,10 @@ def main():
 
         with _Timer(name):
             try:
-                samples = fn(max_n=max_n)
+                if name in _DATASETS_WITH_TRUNCATE:
+                    samples = _DATASETS_WITH_TRUNCATE[name](max_n=max_n, max_context_chars=mcc)
+                else:
+                    samples = _DATASETS_PLAIN[name](max_n=max_n)
             except Exception as e:
                 print(f"  ERROR: {e}", flush=True)
                 traceback.print_exc()
