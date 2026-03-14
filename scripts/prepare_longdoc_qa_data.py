@@ -1053,9 +1053,6 @@ def main():
     parser.add_argument("--max_memory_gb", type=float, default=0,
                         help="Abort gracefully when RSS exceeds this (GB). "
                              "0 = no limit (default). E.g. --max_memory_gb 6")
-    parser.add_argument("--include_redundant", action="store_true",
-                        help="Download redundant datasets too (e.g. scrolls_narrativeqa "
-                             "which duplicates narrativeqa_direct). Default: auto-skip.")
     args = parser.parse_args()
 
     global HF_TOKEN, _MEMORY_LIMIT_GB
@@ -1085,15 +1082,14 @@ def main():
         if only and name not in only:
             print(f"\n  SKIP: {name} (not in --only)", flush=True); continue
 
-        # Auto-skip redundant datasets (e.g. scrolls_narrativeqa ≈ narrativeqa_direct)
-        if not args.include_redundant and name in _REDUNDANT_PAIRS:
+        # Warn about redundant datasets but still process them (different questions)
+        if name in _REDUNDANT_PAIRS:
             primary = _REDUNDANT_PAIRS[name]
             if _cache_exists(primary):
                 primary_count = _cache_count(primary)
-                print(f"\n  ── {name} ──", flush=True)
-                print(f"  AUTO-SKIP: redundant with {primary} ({primary_count:,} samples already cached)", flush=True)
-                print(f"  (use --include_redundant to force download)", flush=True)
-                continue
+                print(f"\n  NOTE: {name} shares documents with {primary} ({primary_count:,} samples),")
+                print(f"        but has different questions — keeping both.", flush=True)
+                print(f"        (use --skip {name} to exclude)", flush=True)
 
         print(f"\n  ── {name} ──", flush=True)
         if not getattr(args, 'no_cache', False) and _cache_exists(name):
@@ -1205,7 +1201,8 @@ def main():
                 out_f.write(json.dumps(s, ensure_ascii=False) + "\n")
                 clean_count += 1
                 name_count += 1
-            print(f"    {name}: {name_count:,} kept", flush=True)
+            gc.collect()
+            print(f"    {name}: {name_count:,} kept  (RSS={_get_current_rss_gb():.2f}GB)", flush=True)
 
     del dedup_keys, seen_keys
     gc.collect()
