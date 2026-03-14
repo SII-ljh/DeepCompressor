@@ -30,6 +30,8 @@ import hashlib
 import json
 import os
 import random
+import resource
+import signal
 import sys
 import time
 import traceback
@@ -42,6 +44,86 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Memory monitoring
+# ═══════════════════════════════════════════════════════════════════════
+
+def _get_rss_gb():
+    """Get current RSS (Resident Set Size) in GB via resource module."""
+    # ru_maxrss is in bytes on macOS, KB on Linux
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_bytes = usage.ru_maxrss
+    if sys.platform == "darwin":
+        return rss_bytes / (1024 ** 3)  # macOS: bytes -> GB
+    else:
+        return rss_bytes / (1024 ** 2)  # Linux: KB -> GB
+
+
+def _get_current_rss_gb():
+    """Get *current* RSS (not peak) in GB. Falls back to peak if /proc unavailable."""
+    try:
+        # Linux: read from /proc for current (not peak) RSS
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024 ** 2)  # KB -> GB
+    except (FileNotFoundError, PermissionError):
+        pass
+    # macOS / fallback: use peak RSS (resource module only gives peak on macOS)
+    return _get_rss_gb()
+
+
+# Default memory limit (GB). Override with --max_memory_gb.
+_MEMORY_LIMIT_GB = None
+
+
+def _check_memory(context=""):
+    """Check memory usage. Raise MemoryError with clear message if over limit."""
+    if _MEMORY_LIMIT_GB is None:
+        return
+    rss = _get_current_rss_gb()
+    if rss > _MEMORY_LIMIT_GB:
+        raise MemoryError(
+            f"\n{'='*70}\n"
+            f"  MEMORY LIMIT EXCEEDED\n"
+            f"{'='*70}\n"
+            f"  Current RSS:  {rss:.2f} GB\n"
+            f"  Limit:        {_MEMORY_LIMIT_GB:.1f} GB\n"
+            f"  Context:      {context}\n"
+            f"\n"
+            f"  Suggestions:\n"
+            f"    1. Use --skip {context} to skip this dataset\n"
+            f"    2. Use --max_memory_gb N to raise the limit\n"
+            f"    3. Use --max_context_chars 130000 to halve per-doc memory\n"
+            f"    4. Close other applications to free memory\n"
+            f"{'='*70}"
+        )
+
+
+def _sigterm_handler(signum, frame):
+    """Handle SIGTERM (often sent before SIGKILL by OOM killer)."""
+    rss = _get_current_rss_gb()
+    peak = _get_rss_gb()
+    print(
+        f"\n{'='*70}\n"
+        f"  SIGTERM RECEIVED (likely OOM killer)\n"
+        f"{'='*70}\n"
+        f"  Current/Peak RSS: {rss:.2f} / {peak:.2f} GB\n"
+        f"\n"
+        f"  The OS killed this process due to memory pressure.\n"
+        f"  Try:\n"
+        f"    --max_memory_gb 4    (abort gracefully before OOM)\n"
+        f"    --max_context_chars 130000  (smaller docs)\n"
+        f"    --skip scrolls_narrativeqa  (skip largest dataset)\n"
+        f"{'='*70}",
+        file=sys.stderr, flush=True,
+    )
+    sys.exit(137)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -72,7 +154,7 @@ class _Timer:
         print(f"  [{self.label}] {time.time() - self.t0:.1f}s", flush=True)
 
 
-def _iter_progress(iterable, desc="Processing", every=5000):
+def _iter_progress(iterable, desc="Processing", every=5000, check_memory_ctx=""):
     count = 0
     t0 = time.time()
     last_print = t0
@@ -82,11 +164,15 @@ def _iter_progress(iterable, desc="Processing", every=5000):
         if count % every == 0 or (now - last_print) >= 30:
             elapsed = now - t0
             rate = count / max(elapsed, 0.01)
-            print(f"    ... {desc}: {count:,} ({elapsed:.0f}s, {rate:.0f}/s)", flush=True)
+            rss = _get_current_rss_gb()
+            print(f"    ... {desc}: {count:,} ({elapsed:.0f}s, {rate:.0f}/s, RSS={rss:.2f}GB)", flush=True)
             last_print = now
+            if check_memory_ctx:
+                _check_memory(check_memory_ctx)
         yield item
     elapsed = time.time() - t0
-    print(f"    ... {desc}: {count:,} total ({elapsed:.0f}s)", flush=True)
+    rss = _get_current_rss_gb()
+    print(f"    ... {desc}: {count:,} total ({elapsed:.0f}s, RSS={rss:.2f}GB)", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -161,6 +247,39 @@ def _cache_count(name):
     else:
         with open(path, "r") as f:
             return len(json.load(f))
+
+
+def _cache_iter(name):
+    """Stream samples from cache one at a time (constant memory).
+
+    Yields dicts. Supports both JSONL and legacy JSON formats.
+    """
+    jsonl_path = CACHE_DIR / f"{name}.jsonl"
+    json_path = CACHE_DIR / f"{name}.json"
+    path = jsonl_path if jsonl_path.exists() else json_path
+    if not path.exists():
+        return
+    if path.suffix == ".jsonl":
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+    else:
+        # Legacy JSON: must load all, then yield one at a time
+        with open(path, "r", encoding="utf-8") as f:
+            for item in json.load(f):
+                yield item
+
+
+def _cache_file_size_mb(name):
+    """Get cache file size in MB, or 0 if not found."""
+    jsonl_path = CACHE_DIR / f"{name}.jsonl"
+    json_path = CACHE_DIR / f"{name}.json"
+    path = jsonl_path if jsonl_path.exists() else json_path
+    if path.exists():
+        return path.stat().st_size / (1024 * 1024)
+    return 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -315,7 +434,8 @@ def download_narrativeqa_direct(max_n=0, max_context_chars=260000, cache_name=No
                               token=HF_TOKEN, streaming=True)
 
             count = 0
-            for row in _iter_progress(ds, desc=f"narrativeqa-{split}"):
+            for row in _iter_progress(ds, desc=f"narrativeqa-{split}",
+                                      check_memory_ctx="narrativeqa_direct"):
                 doc = row.get("document", {})
                 text = doc.get("text", "").strip()
                 if not text:
@@ -378,7 +498,16 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=N
     If cache_name is provided, writes directly to cache (constant memory)
     and returns None. Otherwise returns a list of samples.
     """
-    zip_path = _hf_download("tau/scrolls", "narrative_qa.zip")
+    print(f"    Downloading tau/scrolls narrative_qa.zip ...", flush=True)
+    try:
+        zip_path = _hf_download("tau/scrolls", "narrative_qa.zip")
+    except Exception as e:
+        print(f"      DOWNLOAD FAILED: {e}", flush=True)
+        traceback.print_exc()
+        return [] if cache_name is None else None
+
+    zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+    print(f"    Zip downloaded: {zip_size_mb:.1f} MB  (RSS={_get_current_rss_gb():.2f}GB)", flush=True)
 
     writer = _StreamingCacheWriter(cache_name) if cache_name else None
     samples = [] if writer is None else None
@@ -391,29 +520,58 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=N
 
             count = 0
             with zipfile.ZipFile(zip_path, "r") as zf:
+                # Check that the inner file exists
+                if inner not in zf.namelist():
+                    print(f"      ERROR: '{inner}' not found in zip. Available: {zf.namelist()[:10]}", flush=True)
+                    continue
+
+                inner_info = zf.getinfo(inner)
+                print(f"      {inner}: compressed={inner_info.compress_size/(1024*1024):.1f}MB "
+                      f"uncompressed={inner_info.file_size/(1024*1024):.1f}MB", flush=True)
+
+                # Max bytes per JSON line: skip pathologically large lines
+                # (a full novel as JSON ≈ 1-5 MB; anything > 20 MB is likely corrupt)
+                MAX_LINE_BYTES = 20 * 1024 * 1024  # 20 MB
+
                 with zf.open(inner) as f:
-                    for line_bytes in _iter_progress(f, desc=f"scrolls-nqa-{split}"):
+                    for line_bytes in _iter_progress(f, desc=f"scrolls-nqa-{split}",
+                                                     check_memory_ctx="scrolls_narrativeqa"):
+                        # Guard: skip overly large lines to prevent memory spikes
+                        if len(line_bytes) > MAX_LINE_BYTES:
+                            print(f"      WARNING: skipping oversized line ({len(line_bytes)/(1024*1024):.1f}MB)", flush=True)
+                            del line_bytes
+                            continue
+
                         line = line_bytes.decode("utf-8").strip()
+                        del line_bytes  # free raw bytes immediately
                         if not line:
                             continue
-                        row = json.loads(line)
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError as je:
+                            print(f"      WARNING: bad JSON line (len={len(line)}): {je}", flush=True)
+                            del line
+                            continue
+                        del line  # free decoded string; data now in row dict
 
                         inp = row.get("input", "")
                         output = row.get("output", "")
                         del row  # free parsed JSON immediately
                         if not inp or not output:
+                            del inp, output
                             continue
 
                         # SCROLLS: question first, then document
-                        parts = inp.split("\n\n", 1)
-                        if len(parts) == 2 and len(parts[0]) < 500:
-                            question = parts[0].strip()
-                            context = parts[1].strip()
+                        # Use find() to avoid creating intermediate list from split()
+                        sep_pos = inp.find("\n\n")
+                        if sep_pos != -1 and sep_pos < 500:
+                            question = inp[:sep_pos].strip()
+                            context = inp[sep_pos + 2:].strip()
                         else:
-                            lines_split = inp.split("\n", 1)
-                            if len(lines_split) == 2:
-                                question = lines_split[0].strip()
-                                context = lines_split[1].strip()
+                            sep_pos = inp.find("\n")
+                            if sep_pos != -1:
+                                question = inp[:sep_pos].strip()
+                                context = inp[sep_pos + 1:].strip()
                             else:
                                 del inp
                                 continue
@@ -422,6 +580,7 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=N
                         del inp
 
                         if not context or not question or len(context) < 200:
+                            del context, question
                             continue
 
                         # Truncate to cap memory
@@ -434,18 +593,29 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=N
                             "answer": output.strip(),
                             "source": f"scrolls_narrativeqa_{split}",
                         }
+                        del context, question, output
                         if writer:
                             writer.write(sample)
                         else:
                             samples.append(sample)
+                        del sample
 
                         count += 1
+                        # Periodic gc to prevent memory fragmentation
+                        if count % 2000 == 0:
+                            gc.collect()
                         if max_n and count >= max_n:
                             break
             total_count += count
-            print(f"      {split}: {count} samples", flush=True)
+            print(f"      {split}: {count} samples  (RSS={_get_current_rss_gb():.2f}GB)", flush=True)
+            gc.collect()
+        except MemoryError as e:
+            print(f"\n      MEMORY ERROR ({split}): {e}", flush=True, file=sys.stderr)
+            if writer:
+                writer.close()
+            raise
         except Exception as e:
-            print(f"      FAILED ({split}): {e}", flush=True)
+            print(f"      FAILED ({split}): {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
 
     if writer:
@@ -820,6 +990,39 @@ DATASET_NAMES = [
     "quality_direct", "scrolls_quality", "scrolls_qasper", "leval",
 ]
 
+# Datasets that are redundant with each other (same underlying novels/docs).
+# Key = dataset that can be skipped, value = dataset it duplicates.
+_REDUNDANT_PAIRS = {
+    "scrolls_narrativeqa": "narrativeqa_direct",
+}
+
+
+def _process_chunk(chunk, tokenizer, args, do_truncate, out_f,
+                   all_lengths_out, source_counts_out):
+    """Tokenize a chunk of samples, filter by token length, write survivors.
+
+    Modifies all_lengths_out and source_counts_out in place.
+    """
+    # Tokenize
+    lengths = [len(tokenizer(s["context"], return_tensors=None, padding=False,
+                             truncation=False)["input_ids"]) for s in chunk]
+
+    for s, tok_len in zip(chunk, lengths):
+        # Truncate if needed
+        if do_truncate and tok_len > args.max_tokens:
+            ratio = args.max_tokens / tok_len
+            max_chars = int(len(s["context"]) * ratio * 0.95)
+            s["context"] = s["context"][:max_chars]
+            # Re-tokenize truncated doc
+            tok_len = len(tokenizer(s["context"], return_tensors=None, padding=False,
+                                    truncation=False)["input_ids"])
+
+        # Filter by range
+        if args.min_tokens <= tok_len <= args.max_tokens:
+            out_f.write(json.dumps(s, ensure_ascii=False) + "\n")
+            all_lengths_out.append(tok_len)
+            source_counts_out[s.get("source", "unknown")] += 1
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -847,11 +1050,20 @@ def main():
     parser.add_argument("--output_prefix", default="longdoc_qa")
     parser.add_argument("--hf_token", default=None,
                         help="HuggingFace token (or set HF_TOKEN env var)")
+    parser.add_argument("--max_memory_gb", type=float, default=0,
+                        help="Abort gracefully when RSS exceeds this (GB). "
+                             "0 = no limit (default). E.g. --max_memory_gb 6")
+    parser.add_argument("--include_redundant", action="store_true",
+                        help="Download redundant datasets too (e.g. scrolls_narrativeqa "
+                             "which duplicates narrativeqa_direct). Default: auto-skip.")
     args = parser.parse_args()
 
-    global HF_TOKEN
+    global HF_TOKEN, _MEMORY_LIMIT_GB
     if args.hf_token:
         HF_TOKEN = args.hf_token
+    if args.max_memory_gb > 0:
+        _MEMORY_LIMIT_GB = args.max_memory_gb
+        print(f"  Memory limit: {_MEMORY_LIMIT_GB:.1f} GB", flush=True)
     do_truncate = not args.no_truncate
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -872,6 +1084,16 @@ def main():
             print(f"\n  SKIP: {name}", flush=True); continue
         if only and name not in only:
             print(f"\n  SKIP: {name} (not in --only)", flush=True); continue
+
+        # Auto-skip redundant datasets (e.g. scrolls_narrativeqa ≈ narrativeqa_direct)
+        if not args.include_redundant and name in _REDUNDANT_PAIRS:
+            primary = _REDUNDANT_PAIRS[name]
+            if _cache_exists(primary):
+                primary_count = _cache_count(primary)
+                print(f"\n  ── {name} ──", flush=True)
+                print(f"  AUTO-SKIP: redundant with {primary} ({primary_count:,} samples already cached)", flush=True)
+                print(f"  (use --include_redundant to force download)", flush=True)
+                continue
 
         print(f"\n  ── {name} ──", flush=True)
         if not getattr(args, 'no_cache', False) and _cache_exists(name):
@@ -898,8 +1120,16 @@ def main():
                         _cache_save(name, samples)
                     print(f"  Total from {name}: {len(samples):,}", flush=True)
                     del samples
+            except MemoryError as e:
+                print(f"\n  MEMORY ERROR during {name}: {e}", flush=True, file=sys.stderr)
+                print(f"  RSS at failure: {_get_current_rss_gb():.2f} GB", flush=True, file=sys.stderr)
+                traceback.print_exc()
+                # Save partial progress and continue with other datasets
+                gc.collect()
+                continue
             except Exception as e:
-                print(f"  ERROR: {e}", flush=True)
+                print(f"  ERROR during {name}: {type(e).__name__}: {e}", flush=True)
+                print(f"  RSS at failure: {_get_current_rss_gb():.2f} GB", flush=True)
                 traceback.print_exc()
                 continue
 
@@ -907,104 +1137,239 @@ def main():
             downloaded_names.append(name)
         gc.collect()
 
-    # Load all from cache (single copy in memory)
-    print(f"\n  Loading all cached datasets...", flush=True)
-    all_samples = []
-    for name in downloaded_names:
-        loaded = _cache_load(name)
-        all_samples.extend(loaded)
-        print(f"    {name}: {len(loaded):,}", flush=True)
-        del loaded
-    gc.collect()
-    print(f"\n  Raw total: {len(all_samples):,} samples")
-
-    # ── Clean ──
+    # ── Streaming merge: clean + dedup (two-pass, constant memory) ──
+    #
+    # Problem: loading all caches into memory at once uses 16+ GB.
+    # Solution:
+    #   Pass 1: stream all caches, collect dedup keys (16 bytes each ≈ 1.3 MB for 80K samples)
+    #   Pass 2: stream again, skip dupes + bad samples, write to cleaned JSONL on disk
+    #
     print("\n" + "=" * 70)
-    print("  CLEANING")
+    print("  STREAMING CLEAN + DEDUP")
     print("=" * 70)
-    all_samples = clean_data(all_samples)
-    all_samples = deduplicate(all_samples)
 
-    if not all_samples:
+    # Summarize cache sizes
+    total_cache_mb = 0
+    for name in downloaded_names:
+        sz = _cache_file_size_mb(name)
+        total_cache_mb += sz
+        print(f"    {name}: {_cache_count(name):,} samples ({sz:.1f} MB on disk)", flush=True)
+    print(f"    Total on disk: {total_cache_mb:.0f} MB", flush=True)
+    print(f"    RSS before merge: {_get_current_rss_gb():.2f} GB", flush=True)
+
+    # Pass 1: build dedup key set (stream, constant memory except for the set itself)
+    print(f"\n  Pass 1/2: collecting dedup keys...", flush=True)
+    dedup_keys = set()
+    raw_count = 0
+    dup_count = 0
+    for name in downloaded_names:
+        for s in _cache_iter(name):
+            raw_count += 1
+            ctx_prefix = (s.get("context") or "")[:500]
+            q = s.get("question") or ""
+            key = hashlib.md5((ctx_prefix + "||" + q).encode()).hexdigest()
+            if key in dedup_keys:
+                dup_count += 1
+            else:
+                dedup_keys.add(key)
+    print(f"    Raw: {raw_count:,}  Unique keys: {len(dedup_keys):,}  Dups: {dup_count:,}", flush=True)
+
+    # Pass 2: stream again, apply cleaning + dedup, write to combined JSONL
+    print(f"\n  Pass 2/2: cleaning + writing...", flush=True)
+    combined_path = DATA_DIR / ".longdoc_combined_clean.jsonl"
+    seen_keys = set()
+    reasons = Counter()
+    clean_count = 0
+    with open(combined_path, "w", encoding="utf-8") as out_f:
+        for name in downloaded_names:
+            name_count = 0
+            for s in _cache_iter(name):
+                # Cleaning (inline, same logic as clean_data)
+                ctx = (s.get("context") or "").strip()
+                q = (s.get("question") or "").strip()
+                a = (s.get("answer") or "").strip()
+                if not ctx: reasons["missing_context"] += 1; continue
+                if not q: reasons["missing_question"] += 1; continue
+                if not a: reasons["missing_answer"] += 1; continue
+                if len(ctx) < 50: reasons["short_context"] += 1; continue
+                if len(q) < 2: reasons["short_question"] += 1; continue
+                if _normalize_text(q) == _normalize_text(a): reasons["q_equals_a"] += 1; continue
+
+                # Dedup
+                key = hashlib.md5((ctx[:500] + "||" + q).encode()).hexdigest()
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+
+                s["context"] = ctx; s["question"] = q; s["answer"] = a
+                out_f.write(json.dumps(s, ensure_ascii=False) + "\n")
+                clean_count += 1
+                name_count += 1
+            print(f"    {name}: {name_count:,} kept", flush=True)
+
+    del dedup_keys, seen_keys
+    gc.collect()
+
+    removed = raw_count - clean_count
+    print(f"\n  Cleaning: {raw_count:,} -> {clean_count:,} ({removed:,} removed)")
+    for r, c in reasons.most_common():
+        print(f"    - {r}: {c:,}")
+    print(f"  RSS after clean+dedup: {_get_current_rss_gb():.2f} GB", flush=True)
+
+    if clean_count == 0:
         print("\n  ERROR: No samples after cleaning.")
         sys.exit(1)
 
-    # ── Token lengths & filter ──
+    # ── Token lengths & filter (chunked to limit memory) ──
     print("\n" + "=" * 70)
     print(f"  TOKEN FILTERING [{args.min_tokens:,} – {args.max_tokens:,}]"
           f"  truncate={'ON' if do_truncate else 'OFF'}")
     print("=" * 70)
 
-    lengths = compute_token_lengths(all_samples, args.model, args.num_workers)
-    print_length_stats(all_samples, lengths, label="BEFORE filter")
-
-    # Truncate long docs if requested
-    if do_truncate:
-        truncate_long_docs(all_samples, lengths, args.max_tokens)
-        # Recompute lengths for truncated docs
-        needs_recount = [i for i, l in enumerate(lengths) if l > args.max_tokens]
-        if needs_recount:
-            print(f"    Recomputing lengths for {len(needs_recount):,} truncated docs...", flush=True)
-            recount_items = [all_samples[i] for i in needs_recount]
-            new_lengths = compute_token_lengths(recount_items, args.model, args.num_workers)
-            for idx, new_l in zip(needs_recount, new_lengths):
-                lengths[idx] = new_l
-
-    # Filter by range
-    filtered = []
-    filtered_lengths = []
-    for s, l in zip(all_samples, lengths):
-        if args.min_tokens <= l <= args.max_tokens:
-            filtered.append(s)
-            filtered_lengths.append(l)
-
-    dropped = len(all_samples) - len(filtered)
-    print(f"\n  Filtered: {len(all_samples):,} -> {len(filtered):,} ({dropped:,} dropped)")
-
-    if not filtered:
-        print(f"\n  WARNING: 0 samples in [{args.min_tokens}, {args.max_tokens}]!")
-        print(f"  Saving all {len(all_samples):,} without filter...")
-        filtered, filtered_lengths = all_samples, lengths
-
-    print_length_stats(filtered, filtered_lengths, label="AFTER filter")
-
-    # ── Split ──
-    print("\n" + "=" * 70)
-    print("  SPLIT TRAIN / DEV")
-    print("=" * 70)
-    rng = random.Random(args.seed)
-    indices = list(range(len(filtered)))
-    rng.shuffle(indices)
-    dev_size = max(1, int(len(filtered) * args.dev_ratio))
-    dev_set = set(indices[:dev_size])
-
-    train = [filtered[i] for i in range(len(filtered)) if i not in dev_set]
-    dev = [filtered[i] for i in range(len(filtered)) if i in dev_set]
-    print(f"  Train: {len(train):,}    Dev: {len(dev):,}")
-
-    # ── Save ──
-    print("\n" + "=" * 70)
-    print("  SAVING")
-    print("=" * 70)
+    CHUNK_SIZE = 2000
     train_path = DATA_DIR / f"{args.output_prefix}_train.json"
     dev_path = DATA_DIR / f"{args.output_prefix}_dev.json"
 
-    for path, data, label in [(train_path, train, "train"), (dev_path, dev, "dev")]:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        mb = path.stat().st_size / (1024 * 1024)
-        print(f"  {label}: {path.name}  ({len(data):,} samples, {mb:.1f} MB)")
+    # Chunked tokenization + filtering: read combined JSONL in chunks,
+    # tokenize, filter, write survivors to temp file with their lengths.
+    filtered_path = DATA_DIR / ".longdoc_filtered.jsonl"
+    total_before_filter = 0
+    total_after_filter = 0
+    all_lengths_for_stats = []
+    source_counts = Counter()
+
+    from transformers import AutoTokenizer
+    print(f"    Loading tokenizer from {args.model}...", flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
+    print(f"    Tokenizing & filtering in chunks of {CHUNK_SIZE:,}...", flush=True)
+    t0 = time.time()
+    chunk_buf = []
+    with open(filtered_path, "w", encoding="utf-8") as out_f:
+        with open(combined_path, "r", encoding="utf-8") as in_f:
+            for line in in_f:
+                line = line.strip()
+                if not line:
+                    continue
+                chunk_buf.append(json.loads(line))
+                if len(chunk_buf) >= CHUNK_SIZE:
+                    _process_chunk(chunk_buf, tokenizer, args, do_truncate, out_f,
+                                   all_lengths_for_stats, source_counts)
+                    total_before_filter += len(chunk_buf)
+                    chunk_buf = []
+
+            # Process remaining
+            if chunk_buf:
+                _process_chunk(chunk_buf, tokenizer, args, do_truncate, out_f,
+                               all_lengths_for_stats, source_counts)
+                total_before_filter += len(chunk_buf)
+                chunk_buf = []
+
+    total_after_filter = len(all_lengths_for_stats)
+    elapsed = time.time() - t0
+    print(f"    Tokenized {total_before_filter:,} samples in {elapsed:.1f}s", flush=True)
+    print(f"    Filtered: {total_before_filter:,} -> {total_after_filter:,} "
+          f"({total_before_filter - total_after_filter:,} dropped)", flush=True)
+    print(f"    RSS after tokenization: {_get_current_rss_gb():.2f} GB", flush=True)
+
+    del tokenizer
+    gc.collect()
+
+    if total_after_filter == 0:
+        print(f"\n  WARNING: 0 samples in [{args.min_tokens}, {args.max_tokens}]!")
+        print(f"  Falling back to all {total_before_filter:,} samples...")
+        # Copy combined -> filtered without token filter
+        import shutil
+        shutil.copy2(combined_path, filtered_path)
+        total_after_filter = total_before_filter
+
+    # Print stats
+    if all_lengths_for_stats:
+        arr = np.array(all_lengths_for_stats)
+        p = np.percentile(arr, [10, 25, 50, 75, 90, 95, 99])
+        print(f"\n{'=' * 70}")
+        print(f"  TOKEN LENGTH STATS [AFTER filter] ({len(arr):,} samples)")
+        print(f"{'=' * 70}")
+        print(f"  Min:  {arr.min():>8,}    Max: {arr.max():>8,}    Mean: {arr.mean():>10.1f}")
+        print(f"  P10:  {int(p[0]):>8,}    P25: {int(p[1]):>8,}    P50:  {int(p[2]):>8,}")
+        print(f"  P75:  {int(p[3]):>8,}    P90: {int(p[4]):>8,}    P95:  {int(p[5]):>8,}")
+        print(f"  P99:  {int(p[6]):>8,}")
+
+        buckets = [0, 1024, 2048, 4096, 8192, 16384, 32768, 65536, float("inf")]
+        blabels = ["<1K", "1-2K", "2-4K", "4-8K", "8-16K", "16-32K", "32-64K", ">64K"]
+        print(f"\n  Distribution:")
+        for i in range(len(blabels)):
+            cnt = int(np.sum((arr >= buckets[i]) & (arr < buckets[i + 1])))
+            pct = 100.0 * cnt / len(arr)
+            bar = "█" * int(40 * cnt / max(len(arr), 1))
+            print(f"    {blabels[i]:>8} │{bar:<40} {cnt:>8,} ({pct:5.1f}%)")
+
+        print(f"\n  Per-source:")
+        for src, cnt in source_counts.most_common():
+            print(f"    {src:<35} {cnt:>6,}")
+
+    del all_lengths_for_stats
+    gc.collect()
+
+    # ── Split & Save (stream from filtered JSONL) ──
+    print("\n" + "=" * 70)
+    print("  SPLIT TRAIN / DEV & SAVE")
+    print("=" * 70)
+
+    rng = random.Random(args.seed)
+    # Determine dev indices: pick dev_ratio of [0..total_after_filter) as dev
+    indices = list(range(total_after_filter))
+    rng.shuffle(indices)
+    dev_size = max(1, int(total_after_filter * args.dev_ratio))
+    dev_set = set(indices[:dev_size])
+    del indices
+
+    train_count = 0
+    dev_count = 0
+    with open(train_path, "w", encoding="utf-8") as tf, \
+         open(dev_path, "w", encoding="utf-8") as df:
+        tf.write("[\n")
+        df.write("[\n")
+        idx = 0
+        with open(filtered_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if idx in dev_set:
+                    if dev_count > 0:
+                        df.write(",\n")
+                    df.write(line)
+                    dev_count += 1
+                else:
+                    if train_count > 0:
+                        tf.write(",\n")
+                    tf.write(line)
+                    train_count += 1
+                idx += 1
+        tf.write("\n]")
+        df.write("\n]")
+
+    train_mb = train_path.stat().st_size / (1024 * 1024)
+    dev_mb = dev_path.stat().st_size / (1024 * 1024)
+    print(f"  Train: {train_path.name}  ({train_count:,} samples, {train_mb:.1f} MB)")
+    print(f"  Dev:   {dev_path.name}  ({dev_count:,} samples, {dev_mb:.1f} MB)")
+
+    # Clean up temp files
+    combined_path.unlink(missing_ok=True)
+    filtered_path.unlink(missing_ok=True)
 
     # ── Summary ──
     print("\n" + "=" * 70)
     print("  DONE")
     print("=" * 70)
     print(f"  Token range: [{args.min_tokens:,}, {args.max_tokens:,}]")
-    print(f"  Train: {len(train):,}    Dev: {len(dev):,}")
+    print(f"  Train: {train_count:,}    Dev: {dev_count:,}")
     print(f"  Sources:")
-    for src, cnt in Counter(s["source"] for s in filtered).most_common():
+    for src, cnt in source_counts.most_common():
         print(f"    {src:<35} {cnt:>6,}")
     print(f"\n  {train_path}\n  {dev_path}")
+    print(f"  Peak RSS: {_get_rss_gb():.2f} GB")
     print("=" * 70)
 
 
