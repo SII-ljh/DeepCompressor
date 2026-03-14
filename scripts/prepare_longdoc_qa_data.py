@@ -237,12 +237,13 @@ class _StreamingCacheWriter:
 
 
 def _cache_count(name):
-    """Count samples in cache — fast path via .count sidecar file.
+    """Count samples in cache — NEVER reads large files in Python.
 
     Priority:
-      1. Read <name>.count (instant, a few bytes)
-      2. Use subprocess wc -l (C-level, no Python memory overhead)
-      3. Last resort: Python line iteration (dangerous for GB files)
+      1. Read <name>.count sidecar (instant, a few bytes)
+      2. wc -l in subprocess (C program, ~4 KB memory, safe for any file size)
+      3. For files < 50 MB only: Python binary chunk counting
+      4. Estimate from file size
     """
     # Fast path: sidecar .count file
     cp = _count_path(name)
@@ -259,35 +260,47 @@ def _cache_count(name):
     if not path.exists():
         return 0
 
-    # For large JSONL files, use wc -l (memory-safe, runs in C)
+    file_size = path.stat().st_size
+
     if path.suffix == ".jsonl":
-        import subprocess
+        # Try wc -l (C program, uses ~4 KB RAM regardless of file size)
+        import subprocess as _sp
         try:
-            result = subprocess.run(
+            result = _sp.run(
                 ["wc", "-l", str(path)],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
             if result.returncode == 0:
                 count = int(result.stdout.strip().split()[0])
-                # Save for next time
                 cp.write_text(str(count))
                 return count
-        except (subprocess.TimeoutExpired, ValueError, OSError):
+        except Exception:
             pass
 
-        # Python fallback (risky for multi-GB files)
-        count = 0
-        with open(path, "r") as f:
-            for line in f:
-                if line.strip():
-                    count += 1
-        cp.write_text(str(count))
-        return count
+        # Small files only: count in Python using fixed 64KB binary chunks
+        if file_size < 50 * 1024 * 1024:
+            count = 0
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    count += chunk.count(b"\n")
+            cp.write_text(str(count))
+            return count
+
+        # Large file, wc failed: estimate from file size
+        # Typical long-doc JSONL: ~200 KB per line
+        estimated = max(1, file_size // (200 * 1024))
+        return estimated
     else:
-        with open(path, "r") as f:
-            count = len(json.load(f))
-        cp.write_text(str(count))
-        return count
+        # Legacy JSON (should be small)
+        if file_size < 200 * 1024 * 1024:
+            with open(path, "r") as f:
+                count = len(json.load(f))
+            cp.write_text(str(count))
+            return count
+        return max(1, file_size // (200 * 1024))
 
 
 def _cache_iter(name):
@@ -989,6 +1002,57 @@ _REDUNDANT_PAIRS = {
 }
 
 
+def _run_download_in_subprocess(name, max_n, max_context_chars):
+    """Run a large dataset download in a SEPARATE process.
+
+    If the subprocess gets OOM-killed, the parent survives and gets a clear error.
+    Uses subprocess.Popen (not fork) so the child starts with minimal memory.
+    """
+    import subprocess as _sp
+
+    script = f"""\
+import sys, os, gc
+sys.path.insert(0, {repr(str(PROJECT_ROOT))})
+_hf_token = {repr(HF_TOKEN or "")}
+if _hf_token:
+    os.environ["HF_TOKEN"] = _hf_token
+
+from scripts.prepare_longdoc_qa_data import (
+    download_scrolls_narrativeqa, download_narrativeqa_direct,
+    _STREAMING_DATASETS, CACHE_DIR,
+)
+
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+name = {repr(name)}
+fn = _STREAMING_DATASETS[name]
+print(f"  [subprocess] Downloading {{name}}...", flush=True)
+print(f"  [subprocess] PID={{os.getpid()}}", flush=True)
+fn(max_n={max_n}, max_context_chars={max_context_chars}, cache_name=name)
+print(f"  [subprocess] Done.", flush=True)
+"""
+
+    print(f"    Launching download in isolated subprocess...", flush=True)
+    result = _sp.run(
+        [sys.executable, "-c", script],
+        timeout=7200,  # 2 hour timeout
+    )
+
+    if result.returncode == 0:
+        return True, "OK"
+    elif result.returncode in (-9, 137):
+        return False, (
+            f"Subprocess was OOM-killed (exit code {result.returncode}).\n"
+            f"    The system does not have enough memory to download {name}.\n"
+            f"    Options:\n"
+            f"      1. Use --skip {name}\n"
+            f"      2. Download on a machine with more RAM, then copy the cache:\n"
+            f"         data/.longdoc_cache/{name}.jsonl"
+        )
+    else:
+        return False, f"Subprocess failed with exit code {result.returncode}"
+
+
 def _process_chunk(chunk, tokenizer, args, do_truncate, out_f,
                    all_lengths_out, source_counts_out):
     """Tokenize a chunk of samples, filter by token length, write survivors.
@@ -1093,9 +1157,13 @@ def main():
         with _Timer(name):
             try:
                 if name in _STREAMING_DATASETS:
-                    # Large datasets: stream directly to cache (constant memory)
-                    fn = _STREAMING_DATASETS[name]
-                    fn(max_n=max_n, max_context_chars=mcc, cache_name=name)
+                    # Large datasets: download in isolated subprocess
+                    # so OOM kill doesn't take down the parent process.
+                    ok, msg = _run_download_in_subprocess(name, max_n, mcc)
+                    if not ok:
+                        print(f"  FAILED: {msg}", flush=True)
+                        gc.collect()
+                        continue
                 elif name in _DATASETS_WITH_TRUNCATE:
                     samples = _DATASETS_WITH_TRUNCATE[name](max_n=max_n, max_context_chars=mcc)
                     if samples:
