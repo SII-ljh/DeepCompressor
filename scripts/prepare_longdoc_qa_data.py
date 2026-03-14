@@ -493,21 +493,15 @@ def download_narrativeqa_direct(max_n=0, max_context_chars=260000, cache_name=No
 
 
 def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=None):
-    """NarrativeQA via SCROLLS zip — stream line-by-line, write directly to cache.
+    """NarrativeQA via SCROLLS — HF datasets streaming (no zip download needed).
+
+    Uses datasets.load_dataset with streaming=True so data is pulled on-the-fly
+    from HuggingFace servers, never downloading the full multi-GB zip to disk.
 
     If cache_name is provided, writes directly to cache (constant memory)
     and returns None. Otherwise returns a list of samples.
     """
-    print(f"    Downloading tau/scrolls narrative_qa.zip ...", flush=True)
-    try:
-        zip_path = _hf_download("tau/scrolls", "narrative_qa.zip")
-    except Exception as e:
-        print(f"      DOWNLOAD FAILED: {e}", flush=True)
-        traceback.print_exc()
-        return [] if cache_name is None else None
-
-    zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-    print(f"    Zip downloaded: {zip_size_mb:.1f} MB  (RSS={_get_current_rss_gb():.2f}GB)", flush=True)
+    from datasets import load_dataset
 
     writer = _StreamingCacheWriter(cache_name) if cache_name else None
     samples = [] if writer is None else None
@@ -515,105 +509,62 @@ def download_scrolls_narrativeqa(max_n=0, max_context_chars=260000, cache_name=N
 
     for split in ["train", "validation"]:
         try:
-            inner = f"narrative_qa/{split}.jsonl"
-            print(f"    Streaming tau/scrolls narrative_qa/{split}...", flush=True)
+            print(f"    Loading tau/scrolls narrative_qa ({split}, streaming)... "
+                  f"(RSS={_get_current_rss_gb():.2f}GB)", flush=True)
+            ds = load_dataset("tau/scrolls", "narrative_qa",
+                              split=split, streaming=True, token=HF_TOKEN)
 
             count = 0
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                # Check that the inner file exists
-                if inner not in zf.namelist():
-                    print(f"      ERROR: '{inner}' not found in zip. Available: {zf.namelist()[:10]}", flush=True)
+            for row in _iter_progress(ds, desc=f"scrolls-nqa-{split}",
+                                      check_memory_ctx="scrolls_narrativeqa"):
+                inp = row.get("input", "")
+                output = row.get("output", "")
+                if not inp or not output:
                     continue
 
-                inner_info = zf.getinfo(inner)
-                print(f"      {inner}: compressed={inner_info.compress_size/(1024*1024):.1f}MB "
-                      f"uncompressed={inner_info.file_size/(1024*1024):.1f}MB", flush=True)
+                # SCROLLS format: question first, then document
+                sep_pos = inp.find("\n\n")
+                if sep_pos != -1 and sep_pos < 500:
+                    question = inp[:sep_pos].strip()
+                    context = inp[sep_pos + 2:].strip()
+                else:
+                    sep_pos = inp.find("\n")
+                    if sep_pos != -1:
+                        question = inp[:sep_pos].strip()
+                        context = inp[sep_pos + 1:].strip()
+                    else:
+                        continue
 
-                # Max bytes per JSON line: skip pathologically large lines
-                # (a full novel as JSON ≈ 1-5 MB; anything > 20 MB is likely corrupt)
-                MAX_LINE_BYTES = 20 * 1024 * 1024  # 20 MB
+                del inp
+                if not context or not question or len(context) < 200:
+                    continue
 
-                with zf.open(inner) as f:
-                    for line_bytes in _iter_progress(f, desc=f"scrolls-nqa-{split}",
-                                                     check_memory_ctx="scrolls_narrativeqa"):
-                        # Guard: skip overly large lines to prevent memory spikes
-                        if len(line_bytes) > MAX_LINE_BYTES:
-                            print(f"      WARNING: skipping oversized line ({len(line_bytes)/(1024*1024):.1f}MB)", flush=True)
-                            del line_bytes
-                            continue
+                # Truncate to cap memory
+                if len(context) > max_context_chars:
+                    context = context[:max_context_chars]
 
-                        line = line_bytes.decode("utf-8").strip()
-                        del line_bytes  # free raw bytes immediately
-                        if not line:
-                            continue
-                        try:
-                            row = json.loads(line)
-                        except json.JSONDecodeError as je:
-                            print(f"      WARNING: bad JSON line (len={len(line)}): {je}", flush=True)
-                            del line
-                            continue
-                        del line  # free decoded string; data now in row dict
+                sample = {
+                    "context": context,
+                    "question": question,
+                    "answer": output.strip(),
+                    "source": f"scrolls_narrativeqa_{split}",
+                }
+                del context, question, output
 
-                        inp = row.get("input", "")
-                        output = row.get("output", "")
-                        del row  # free parsed JSON immediately
-                        if not inp or not output:
-                            del inp, output
-                            continue
+                if writer:
+                    writer.write(sample)
+                else:
+                    samples.append(sample)
 
-                        # SCROLLS: question first, then document
-                        # Use find() to avoid creating intermediate list from split()
-                        sep_pos = inp.find("\n\n")
-                        if sep_pos != -1 and sep_pos < 500:
-                            question = inp[:sep_pos].strip()
-                            context = inp[sep_pos + 2:].strip()
-                        else:
-                            sep_pos = inp.find("\n")
-                            if sep_pos != -1:
-                                question = inp[:sep_pos].strip()
-                                context = inp[sep_pos + 1:].strip()
-                            else:
-                                del inp
-                                continue
+                count += 1
+                if count % 2000 == 0:
+                    gc.collect()
+                if max_n and count >= max_n:
+                    break
 
-                        # Free the large input string immediately
-                        del inp
-
-                        if not context or not question or len(context) < 200:
-                            del context, question
-                            continue
-
-                        # Truncate to cap memory
-                        if len(context) > max_context_chars:
-                            context = context[:max_context_chars]
-
-                        sample = {
-                            "context": context,
-                            "question": question,
-                            "answer": output.strip(),
-                            "source": f"scrolls_narrativeqa_{split}",
-                        }
-                        del context, question, output
-                        if writer:
-                            writer.write(sample)
-                        else:
-                            samples.append(sample)
-                        del sample
-
-                        count += 1
-                        # Periodic gc to prevent memory fragmentation
-                        if count % 2000 == 0:
-                            gc.collect()
-                        if max_n and count >= max_n:
-                            break
             total_count += count
             print(f"      {split}: {count} samples  (RSS={_get_current_rss_gb():.2f}GB)", flush=True)
             gc.collect()
-        except MemoryError as e:
-            print(f"\n      MEMORY ERROR ({split}): {e}", flush=True, file=sys.stderr)
-            if writer:
-                writer.close()
-            raise
         except Exception as e:
             print(f"      FAILED ({split}): {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
