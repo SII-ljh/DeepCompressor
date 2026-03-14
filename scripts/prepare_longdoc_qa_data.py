@@ -185,12 +185,16 @@ def _cache_exists(name):
     # Also check legacy .json for backward compat
     return _cache_path(name).exists() or (CACHE_DIR / f"{name}.json").exists()
 
+def _count_path(name): return CACHE_DIR / f"{name}.count"
+
 def _cache_save(name, samples):
     """Save list of samples as JSONL (one JSON object per line)."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(_cache_path(name), "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
+    # Write sidecar count file so we never need to re-read GB files just to count
+    _count_path(name).write_text(str(len(samples)))
     print(f"    -> cached {len(samples):,} samples", flush=True)
 
 def _cache_load(name):
@@ -224,6 +228,8 @@ class _StreamingCacheWriter:
 
     def close(self):
         self.f.close()
+        # Write sidecar count file
+        _count_path(self.path.stem).write_text(str(self.count))
         print(f"    -> cached {self.count:,} samples (streaming)", flush=True)
 
     def __enter__(self): return self
@@ -231,22 +237,57 @@ class _StreamingCacheWriter:
 
 
 def _cache_count(name):
-    """Count samples in cache without loading all into memory."""
+    """Count samples in cache — fast path via .count sidecar file.
+
+    Priority:
+      1. Read <name>.count (instant, a few bytes)
+      2. Use subprocess wc -l (C-level, no Python memory overhead)
+      3. Last resort: Python line iteration (dangerous for GB files)
+    """
+    # Fast path: sidecar .count file
+    cp = _count_path(name)
+    if cp.exists():
+        try:
+            return int(cp.read_text().strip())
+        except (ValueError, OSError):
+            pass
+
+    # Find the data file
     jsonl_path = CACHE_DIR / f"{name}.jsonl"
     json_path = CACHE_DIR / f"{name}.json"
     path = jsonl_path if jsonl_path.exists() else json_path
     if not path.exists():
         return 0
+
+    # For large JSONL files, use wc -l (memory-safe, runs in C)
     if path.suffix == ".jsonl":
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["wc", "-l", str(path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                count = int(result.stdout.strip().split()[0])
+                # Save for next time
+                cp.write_text(str(count))
+                return count
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            pass
+
+        # Python fallback (risky for multi-GB files)
         count = 0
         with open(path, "r") as f:
             for line in f:
                 if line.strip():
                     count += 1
+        cp.write_text(str(count))
         return count
     else:
         with open(path, "r") as f:
-            return len(json.load(f))
+            count = len(json.load(f))
+        cp.write_text(str(count))
+        return count
 
 
 def _cache_iter(name):
